@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# archivos que genera el programa de la PC en cada corrida
+# (copiar a resultados/ los que valga la pena guardar)
+pc/datos_pid_*.csv
+pc/escalon_*.png
+datos_pid_*.csv
+escalon_*.png

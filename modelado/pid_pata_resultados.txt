@@ -1,0 +1,30 @@
+=== Planta servo + pata ===
+G_sp(s) = 3.5250e-03 / (3.9170e-06 s² + 2.3500e-04 s + 5.7835e-03)
+Polos: [-30.+24.01j -30.-24.01j] · ganancia estática 0.609
+G_sp(z), ZOH Ts = 0.02 s:  (0.11976 z + 0.07999) / (z² -0.97350 z +0.30122)
+
+=== PID ===
+Kp = 0.75   Ki = 19.0 1/s   Kd = 0.008 s   Tf = 0.02 s
+Polos de lazo cerrado en z: [ 0.5613+0.4328j  0.5613-0.4328j  0.671 +0.0829j  0.671 -0.0829j
+ -0.1579+0.j    ]
+|z| máximo: 0.7088 (< 1 → estable)
+Equivalentes en s = ln(z)/Ts: [-17.2 +32.8j -17.2 -32.8j -19.6  +6.1j -19.6  -6.1j -92.3+157.1j]
+
+=== Ecuación en diferencias para el ESP8266 (Ts = 20 ms, ángulos en rad) ===
+e_k = r_k − y_k
+I_k = I_(k−1) + 0.1900·(e_k + e_(k−1))
+D_k = 0.3333·D_(k−1) − 0.2667·(y_k − y_(k−1))
+u_k = 0.75·e_k + I_k + D_k   → saturar a [220°, 330°], convertir a write()
+
+=== Escalón de +10° en la referencia (275° → 285°) ===
+Solo el servo (sin lazo externo)       SO= 0.0 %  t_s(2 %)=1.099 s  error final=+5.99°
+PID discreto, sin cuantización         SO= 0.3 %  t_s(2 %)=0.136 s  error final=-0.00°
+PID discreto, con write() y AS5600     SO= 0.4 %  t_s(5 %)=0.125 s  error final=+0.06°
+Con cuantización, θ oscila entre 284.94° y 285.01° (1 paso de write() = 0.61°)
+
+=== Robustez (K_servo, B_servo ±30 %, M ±20 %) ===
+|z| máximo en los 18 casos: 0.905 (K×1.3, B×0.7, M×1.2)
+Peor sobrepaso: 15.2 % (K×1.3, B×0.7, M×1.2)
+Peor t_s(2 %): 0.628 s (K×1.3, B×0.7, M×1.2)
+
+Gráfica: pid_pata_escalon.png
