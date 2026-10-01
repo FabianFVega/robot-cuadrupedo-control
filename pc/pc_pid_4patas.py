@@ -10,7 +10,11 @@ Que hace:
   - Deja escribir comandos en la terminal y los manda a la ESP:
         ref=260        las 4 patas
         ref1=260       solo FI   (ref2 = FD, ref3 = TI, ref4 = TD)
-        kp=0.8  ki=12  kd=0.008
+        kp=0.8  ki=12  kd=0.008      ganancias de las 4 patas
+        kp3=0.3  ki3=4  kd3=0        ganancias de una sola pata (1=FI 2=FD 3=TI 4=TD)
+        banda3=1.5     zona muerta del integrador de esa pata (grados)
+                       (las ganancias se guardan en calibracion_patas.json y se
+                       reenvian solas al reconectar)
         modo=pid  /  modo=abierto
         escalon        prueba de escalon automatica (ver abajo)
         calibrar       mueve una pata a la vez en lazo abierto y dice que sensor
@@ -62,7 +66,7 @@ PATAS = ["FI", "FD", "TI", "TD"]
 REF_BASE = 265.0            # grados
 AMPLITUD = 10.0             # grados
 ESPERA_S = 3.0              # tiempo en cada nivel
-BANDA_ASENT = 0.5           # grados, banda para el tiempo de asentamiento
+BANDA_ASENT = 1.0           # grados: 1 write = 0.6° y el servo no se mueve con 1 solo write
 
 CAMPOS = ["t_ms"] + [f"{c}{i}" for i in range(1, 5)
                      for c in ("ref", "theta", "error", "write")]
@@ -140,6 +144,14 @@ class EnlaceESP:
             self.cal = list(self.cal)
             self.cal[int(clave[3]) - 1] = (a, b)
             guardar_calibracion(self.cal)
+        # recordar ganancias (kp=, kp3=, ki2=, banda3=, ...) para reenviarlas al reconectar
+        base = clave.rstrip("1234")
+        if registrar and base in ("kp", "ki", "kd", "banda") and len(clave) - len(base) <= 1:
+            try:
+                v = float(valor)
+            except ValueError:
+                return
+            guardar_ganancia(clave, v)
 
     def vigilar(self):
         """Si la conexion esta abierta pero no llega telemetria, la cierra y reconecta."""
@@ -265,6 +277,35 @@ def guardar_calibracion(cal, tablas=None):
                        for p, (a, b) in enumerate(cal)]}
     if tablas:
         datos["tablas"] = tablas
+    g = leer_ganancias()
+    if g:
+        datos["ganancias"] = g
+    with open(ARCHIVO_CAL, "w") as f:
+        json.dump(datos, f, indent=2)
+
+
+def leer_ganancias():
+    try:
+        with open(ARCHIVO_CAL) as f:
+            return json.load(f).get("ganancias", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def guardar_ganancia(clave, valor):
+    """Guarda kp/ki/kd/banda (global o por pata) en el json de calibracion."""
+    try:
+        with open(ARCHIVO_CAL) as f:
+            datos = json.load(f)
+    except (OSError, ValueError):
+        datos = {}
+    g = datos.get("ganancias", {})
+    base = clave.rstrip("1234")
+    if base == clave:                      # global: reemplaza las de cada pata
+        for p in "1234":
+            g.pop(base + p, None)
+    g[clave] = valor
+    datos["ganancias"] = g
     with open(ARCHIVO_CAL, "w") as f:
         json.dump(datos, f, indent=2)
 
@@ -282,6 +323,9 @@ def cargar_calibracion(enlace):
         enlace.enviar(f"cal{p + 1}={a:.2f},{b:.4f}", registrar=False)
         if tablas[p]:
             enlace.enviar(f"tab{p + 1}=" + ",".join(f"{x:.2f}" for x in tablas[p]), registrar=False)
+    g = cal.get("ganancias", {})
+    for clave in sorted(g, key=lambda c: (c.rstrip("1234") != c, c)):   # primero globales
+        enlace.enviar(f"{clave}={g[clave]}", registrar=False)
     print(f"  Calibracion cargada de {ARCHIVO_CAL} ({cal.get('fecha', '')}) y enviada a la ESP.")
     return True
 
@@ -310,8 +354,11 @@ def prueba_escalon(enlace):
         for p in range(4):
             enlace.enviar(f"ref{p + 1}={refs[p]:.2f}")
 
-    enlace.enviar("modo=pid")
+    # arranque sin golpe: llevar las patas a la base en lazo abierto y luego cerrar el lazo
+    enlace.enviar("modo=abierto")
     mandar(base)
+    time.sleep(1.5)
+    enlace.enviar("modo=pid")
     time.sleep(ESPERA_S)
     with enlace.lock:
         enlace.registro = []

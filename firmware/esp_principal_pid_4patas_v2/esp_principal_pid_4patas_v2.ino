@@ -36,7 +36,11 @@
   Protocolo Python -> ESP (una linea por comando, termina en \n):
       ref1=250.0 ... ref4=250.0   setpoint de una pata (FI, FD, TI, TD)
       ref=250.0                   las 4 patas al mismo valor
-      kp=0.8   ki=12   kd=0.008   cambia ganancias (reinicia el integrador)
+      kp=0.8   ki=12   kd=0.008   ganancias de las 4 patas (reinicia el integrador)
+      kp3=0.3  ki3=4   kd3=0      ganancias de UNA pata (1..4 = FI, FD, TI, TD)
+      banda3=1.5                  zona muerta del integrador de una pata (grados):
+                                  con |error| menor no integra (evita que la holgura
+                                  del montaje haga "cazar" a la pata). banda=x -> las 4
       cal1=193.3,0.655            calibracion de una pata en vivo (cal1..cal4):
                                   theta = THETA_W0 + GRADOS_POR_WRITE * write
                                   (la genera el comando "calibrar" de Python)
@@ -92,8 +96,9 @@ Servo servo_4;  // Coxa TI (fija)
 // ese servo esta en espejo -> poner GRADOS_POR_WRITE negativo y THETA_W0
 // igual al angulo medido con write = 0.
 // ---------------------------------------------------------------
-float THETA_W0[NUM_PATAS]         = {220.0, 220.0, 220.0, 220.0};
-float GRADOS_POR_WRITE[NUM_PATAS] = {0.6111, 0.6111, 0.6111, 0.6111};
+// Valores medidos con "linealizar" el 2026-10-01 00:15 (calibracion_patas.json):
+float THETA_W0[NUM_PATAS]         = {192.794, 324.000, 232.988, 324.000};
+float GRADOS_POR_WRITE[NUM_PATAS] = {0.6000, -0.6000, 0.6000, -0.6000};
 
 // ---------------------------------------------------------------
 // Linealizacion del AS5600 por tabla (montaje con el iman fuera del eje)
@@ -108,8 +113,14 @@ float GRADOS_POR_WRITE[NUM_PATAS] = {0.6111, 0.6111, 0.6111, 0.6111};
 // ---------------------------------------------------------------
 #define N_TABLA 11
 const int TABLA_W0 = 40, TABLA_PASO = 10;      // writes 40, 50, ..., 140
-float tabla[NUM_PATAS][N_TABLA];
-bool  tablaOK[NUM_PATAS] = {false, false, false, false};
+// tablas medidas con "linealizar" el 2026-10-01 00:15 (se pueden reemplazar con tab1..4=)
+float tabla[NUM_PATAS][N_TABLA] = {
+  {244.04, 246.47, 248.48, 250.95, 253.62, 256.65, 259.73, 263.14, 267.01, 270.46, 274.15},   // FI
+  {269.87, 266.27, 262.13, 257.09, 252.07, 247.03, 240.91, 236.03, 229.54, 221.93, 214.81},   // FD
+  {253.97, 262.33, 269.05, 274.69, 279.13, 283.54, 287.38, 290.74, 294.81, 298.84, 303.92},   // TI
+  {310.37, 305.86, 302.08, 297.72, 294.39, 290.04, 286.83, 283.75, 280.24, 276.11, 272.28}   // TD
+};
+bool  tablaOK[NUM_PATAS] = {true, true, true, true};
 
 float linealizar(uint8_t p, float y) {
   if (!tablaOK[p]) return y;
@@ -133,19 +144,25 @@ float linealizar(uint8_t p, float y) {
 // ---------------------------------------------------------------
 // PID (angulos en grados; Kp adimensional, Ki en 1/s, Kd en s)
 // ---------------------------------------------------------------
-float KP = 0.8;
-float KI = 12.0;
-float KD = 0.008;
+// Ganancias POR PATA (FI, FD, TI, TD): las izquierdas tienen mas holgura en el
+// montaje del AS5600 y necesitan ganancias mas suaves que las derechas.
+// Ganancias con las que el escalon salio bien con la pata al aire (1-oct):
+float KP[NUM_PATAS] = {0.5, 0.8, 0.4, 0.8};
+float KI[NUM_PATAS] = {6.0, 12.0, 5.0, 12.0};
+float KD[NUM_PATAS] = {0.0, 0.008, 0.0, 0.008};
+float BANDA_I[NUM_PATAS] = {1.0, 0.5, 1.0, 0.5};   // grados: |e| < banda -> no integra
 const float TS = 0.020;                 // s, periodo fijo de control (50 Hz)
 const unsigned long PERIODO_CONTROL_MS = 20;
 const float TF = TS;                    // s, filtro de la derivada
 
 // coeficientes de la ecuacion en diferencias (se recalculan si cambian las ganancias)
-float c_i, c1, c2;
+float c_i[NUM_PATAS], c2[NUM_PATAS], c1;
 void calcularCoeficientes() {
-  c_i = KI * TS / 2.0;                  // integral por Tustin
-  c1  = (2.0 * TF - TS) / (2.0 * TF + TS);
-  c2  = 2.0 * KD / (2.0 * TF + TS);     // derivada filtrada por Tustin
+  c1 = (2.0 * TF - TS) / (2.0 * TF + TS);
+  for (uint8_t p = 0; p < NUM_PATAS; p++) {
+    c_i[p] = KI[p] * TS / 2.0;                 // integral por Tustin
+    c2[p]  = 2.0 * KD[p] / (2.0 * TF + TS);    // derivada filtrada por Tustin
+  }
 }
 
 // Modelo de referencia: servo nominal wn = 30 rad/s, zeta = 1, discretizado
@@ -195,6 +212,41 @@ float parsearCampo(const String &linea, const String &clave) {
   return valorStr.toFloat();
 }
 
+// ---------------------------------------------------------------
+// Filtro de lecturas imposibles (robot apoyado en el piso)
+// Con carga el iman fuera del eje puede dar lecturas absurdas (ej. 470°):
+//  - fuera del rango alcanzable (write 40..140) con un margen -> se descarta
+//  - salto mayor que MAX_SALTO en 20 ms (el MG90S gira ~12° en 20 ms) -> se descarta
+// Una lectura descartada se reemplaza por la ultima valida, asi el PID no da
+// golpes. Si hay mas de MAX_DESCARTES seguidas, se acepta la nueva (puede
+// que la pata realmente este ahi).
+// ---------------------------------------------------------------
+const float MAX_SALTO = 20.0;          // grados por muestra
+const float MARGEN_RANGO = 15.0;       // grados fuera del rango alcanzable
+const uint8_t MAX_DESCARTES = 3;
+float thetaValida[NUM_PATAS];
+bool  hayValida[NUM_PATAS] = {false, false, false, false};
+uint8_t descartesSeguidos[NUM_PATAS] = {0, 0, 0, 0};
+unsigned long lecturasDescartadas[NUM_PATAS] = {0, 0, 0, 0};
+
+float filtrarLectura(uint8_t p, float y) {
+  float a = THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MIN;
+  float b = THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MAX;
+  float lo = min(a, b) - MARGEN_RANGO, hi = max(a, b) + MARGEN_RANGO;
+  bool fueraRango = tablaOK[p] && (y < lo || y > hi);
+  bool salto = hayValida[p] && fabs(y - thetaValida[p]) > MAX_SALTO;
+  if ((fueraRango || salto) && hayValida[p] && descartesSeguidos[p] < MAX_DESCARTES) {
+    descartesSeguidos[p]++;
+    lecturasDescartadas[p]++;
+    return thetaValida[p];                       // mantener la ultima buena
+  }
+  if (fueraRango) y = constrain(y, lo, hi);      // nunca pasar al PID algo absurdo
+  descartesSeguidos[p] = 0;
+  thetaValida[p] = y;
+  hayValida[p] = true;
+  return y;
+}
+
 // contadores para el diagnostico
 unsigned long bytesSensores = 0, lineasSensores = 0, lineasSinTheta = 0;
 String ultimaLineaSensores = "";
@@ -208,7 +260,7 @@ void procesarLineaSensores(const String &linea) {
   theta[TI] = parsearCampo(linea, "theta3=");
   theta[TD] = parsearCampo(linea, "theta4=");
   for (uint8_t p = 0; p < NUM_PATAS; p++)         // angulo lineal si hay tabla
-    if (theta[p] > VALOR_NO_DISPONIBLE + 1.0) theta[p] = linealizar(p, theta[p]);
+    if (theta[p] > VALOR_NO_DISPONIBLE + 1.0) theta[p] = filtrarLectura(p, linealizar(p, theta[p]));
   ultimoDatoRecibido = millis();
 }
 
@@ -339,9 +391,26 @@ void aplicarComando(String linea) {
   else if (clave == "ref")  {
     for (uint8_t p = 0; p < NUM_PATAS; p++) { referencia[p] = val; avisarSiFueraDeRango(p, val); }
   }
-  else if (clave == "kp")   { KP = val; calcularCoeficientes(); reiniciarControlador(); }
-  else if (clave == "ki")   { KI = val; calcularCoeficientes(); reiniciarControlador(); }
-  else if (clave == "kd")   { KD = val; calcularCoeficientes(); reiniciarControlador(); }
+  else if (clave.startsWith("kp") || clave.startsWith("ki") || clave.startsWith("kd") ||
+           clave.startsWith("banda")) {
+    // kp=, ki=, kd=, banda= -> las 4 patas;  kp1..kp4=, ki1.., kd1.., banda1.. -> una pata
+    String base = clave;
+    int p = -1;
+    char ult = clave.charAt(clave.length() - 1);
+    if (ult >= '1' && ult <= '4') { p = ult - '1'; base = clave.substring(0, clave.length() - 1); }
+    float* arr = (base == "kp") ? KP : (base == "ki") ? KI : (base == "kd") ? KD :
+                 (base == "banda") ? BANDA_I : nullptr;
+    if (arr == nullptr) { mensajeWifi("comando no reconocido: " + linea); return; }
+    for (uint8_t q = 0; q < NUM_PATAS; q++) if (p < 0 || q == p) arr[q] = val;
+    calcularCoeficientes();
+    reiniciarControlador();
+    String g = "";
+    for (uint8_t q = 0; q < NUM_PATAS; q++)
+      g += String(q ? " | " : "") + String(q + 1) + ": kp=" + String(KP[q], 2) + " ki=" +
+           String(KI[q], 1) + " kd=" + String(KD[q], 3) + " banda=" + String(BANDA_I[q], 1);
+    mensajeWifi("OK " + clave + "=" + String(val, 3) + "  -> " + g);
+    return;
+  }
   else { mensajeWifi("comando no reconocido: " + linea); return; }
   mensajeWifi("OK " + clave + "=" + String(val, 3));
 }
@@ -376,6 +445,9 @@ void diagnostico() {
              " | write=" + String(writeActual[FI]) + "," + String(writeActual[FD]) + "," +
              String(writeActual[TI]) + "," + String(writeActual[TD]);
   mensajeWifi(s);
+ mensajeWifi("lecturas descartadas por el filtro (FI,FD,TI,TD): " + String(lecturasDescartadas[FI]) + "," +
+              String(lecturasDescartadas[FD]) + "," + String(lecturasDescartadas[TI]) + "," +
+              String(lecturasDescartadas[TD]));
   mensajeWifi("ultima linea recibida: " + (ultimaLineaSensores.length() ? ultimaLineaSensores : String("(ninguna)")));
   if (DEBUG_SERIAL) {
     Serial.print("[dbg] "); Serial.println(s);
@@ -419,11 +491,13 @@ int pasoControl(uint8_t p, float r, float y) {
 
   // 2) PID sobre el error respecto al modelo
   float e = ym - y;
-  float integralNueva = integral[p] + c_i * (e + e_prev[p]);
-  derivada[p] = c1 * derivada[p] - c2 * (y - y_prev[p]);
+  float integralNueva = integral[p];
+  if (fabs(r - y) >= BANDA_I[p])                 // zona muerta: cerca de la referencia no integra
+    integralNueva += c_i[p] * (e + e_prev[p]);
+  derivada[p] = c1 * derivada[p] - c2[p] * (y - y_prev[p]);
 
   // 3) feedforward (la referencia) + correccion del PID
-  float thetaCmd = r + KP * e + integralNueva + derivada[p];
+  float thetaCmd = r + KP[p] * e + integralNueva + derivada[p];
   int w = writeDesdeTheta(p, thetaCmd);
   int wSat = constrain(w, WRITE_MIN, WRITE_MAX);
 
@@ -488,7 +562,7 @@ void loop() {
     cliente = nuevo;
     cliente.setNoDelay(true);
     bufferEntradaWifi = "";
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd=, modo=pid|abierto, cal1..4=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, cal1..4=, tab1..4=");
   }
   revisarComandoWifi();
 

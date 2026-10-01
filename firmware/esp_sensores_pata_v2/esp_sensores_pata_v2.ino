@@ -68,8 +68,10 @@ const uint8_t CANAL_AS5600[NUM_PATAS] = {0, 7, 1, 2};
 //   theta enviada = SIGNO * (angulo_AS5600 - OFFSET), llevada a [0, 360)
 // Con OFFSET = 0 y SIGNO = 1 se manda el angulo crudo (como antes).
 // ---------------------------------------------------------------
-float OFFSET_AS5600[NUM_PATAS] = {0.0, 0.0, 0.0, 0.0};
-int   SIGNO_AS5600[NUM_PATAS]  = {1, 1, 1, 1};
+// Valores del comando "cero" (30-sep): con las patas verticales las 4 leen 270°.
+// VERIFICAR que coincidan con los que estan cargados en el robot.
+float OFFSET_AS5600[NUM_PATAS] = {326.41, 156.01, 334.78, 10.81};
+int   SIGNO_AS5600[NUM_PATAS]  = {1, -1, 1, -1};
 
 Adafruit_MPU6050 mpu;
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
