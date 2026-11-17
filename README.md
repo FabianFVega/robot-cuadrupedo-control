@@ -67,3 +67,14 @@ git push
 
 Los CSV y PNG que genera el programa en cada corrida no se suben solos; los
 que sirvan como evidencia se copian a `resultados/` con un nombre descriptivo.
+
+
+## 16-nov: sensores caracterizados
+
+El firmware de la ESP principal usa la caracterización de `docs/Caracterizacion_de_sensores.xlsx`
+(escala del giroscopio, recta del láser y tabla de ángulo real por rodilla) y un modelo de la
+marcha para la órbita (`vel=`, `kuff=`, `control=1`). Detalle, resultados de la simulación y
+pruebas: `docs/cambios_16nov_sensores.md`.
+
+Nota: `firmware/esp_sensores_pata_v2` y `pc/` de este repositorio son versiones de comienzos de
+octubre. Las del 28-oct que están en el robot y en la PC no se han subido aquí.

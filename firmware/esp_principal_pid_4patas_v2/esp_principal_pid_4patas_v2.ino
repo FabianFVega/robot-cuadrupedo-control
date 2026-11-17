@@ -63,7 +63,12 @@
                                   real cuando el sensor marca 220, 230, ..., 310)
       escgiro=1.0165              escala del giroscopio (angulo real / angulo leido)
       lasera=0.9721  laserb=-1.047  recta del laser: cm reales = a*lectura cruda + b
-      vel=4                       velocidad de avance (cm/s): calcula wref para el dref actual
+      vel=4                       velocidad de avance (cm/s): al encender la orbita se calcula
+                                  wref = vel / radio para el dref pedido (wref= lo fija a mano)
+      kuff=0.0478                 prealimentacion: grados/s que gira el robot por cada grado de
+                                  ddesf (ddesf de partida = wref/kuff). kuff=0 -> u0 fijo, como antes
+      control=1 / control=0       lazo de distancia ajustado con el modelo (kpe 0.3, kde 5,
+                                  kie 0.03, wlim 5) / el del 28-oct (0.14, 2, 0.02, 3)
       epscorr=0 / 1               parada de la orbita solo con el giroscopio / con la
                                   correccion por acercarse o alejarse del tubo
   Protocolo ESP -> Python (igual que antes, 17 campos por linea):
@@ -597,6 +602,20 @@ float WLIM = 3.0;           // grados/s, maxima correccion por distancia
 float IELIM = 4.0;          // grados/s, tope de la integral de distancia
 float DMAX_ORB = 35.0;      // cm, mas lejos = el haz no esta en el tubo
 float DESFASE_ORBITA = -45.0; // desfase base durante la orbita con ddesf (desforb=)
+// 16-nov: modelo de la marcha en la orbita (modelado/orbita_sensores_sim.py).
+//   VEL_AVANCE: velocidad de avance (cm/s). Al encender la orbita, wref = vel/R con
+//     R = 5.75 + dref + 6: asi wref corresponde al dref pedido (antes era -8.5 fijo,
+//     que solo vale para dref = 15). Si se escribe wref= a mano, se respeta.
+//   KUFF: grados/s que gira el robot por cada grado de ddesf (25-oct: ddesf = -180
+//     giraba -8.6 grados/s -> 0.0478). Prealimentacion: ddesf parte de (giro pedido /
+//     KUFF) y el PI del lazo interno solo corrige lo que falte. Antes partia siempre
+//     de u0 = -180 y el PI tardaba varios segundos en llegar al valor de otro dref: en
+//     la simulacion eso abria la orbita y el laser perdia el tubo. kuff=0 lo desactiva.
+// Los dos valores son del 25-oct: volver a medirlos (README, pruebas M1 a M3) porque
+// cambiaron el servo de TI, el peso (395.2 g) y la amplitud real de las patas.
+float VEL_AVANCE = 4.0;
+float KUFF = 0.0478;
+bool  wrefManual = false;
 float phiInicioOrbita = 0.0;
 float distFilt = -1.0, dDistFilt = 0.0;
 float wFilt = 0.0, iW = 0.0, iE = 0.0, wObj = 0.0, uOrbita = 0.0;
@@ -623,6 +642,12 @@ bool  USAR_EPS = false;
 
 void aplicarActuador(float u) {
   if (ACTUADOR == 0) DAMP = u; else DDESF = u;
+}
+
+// valor de partida del actuador para un giro pedido (grados/s)
+float baseActuador(float giro) {
+  if (ACTUADOR == 1 && KUFF > 0.0) return constrain(giro / KUFF, UMIN[1], UMAX[1]);
+  return U0[ACTUADOR];
 }
 
 void pasoOrbita() {
@@ -674,10 +699,12 @@ void pasoOrbita() {
   anguloTubo = (phiDeg - phiInicioOrbita) - (epsInicioListo ? (epsAhora - epsInicio) : 0.0);
   // lazo interno de giro
   float ew = wObj - wFilt;
-  iW = constrain(iW + KIW * ew * dt, UMIN[k] - U0[k], UMAX[k] - U0[k]);
-  uOrbita = constrain(U0[k] + iW + KPW * ew, UMIN[k], UMAX[k]);
+  float base = baseActuador(wObj);
+  iW = constrain(iW + KIW * ew * dt, UMIN[k] - base, UMAX[k] - base);
+  uOrbita = constrain(base + iW + KPW * ew, UMIN[k], UMAX[k]);
   aplicarActuador(uOrbita);
-  // parada: con el angulo alrededor del tubo si el laser ve el tubo, si no con phi
+  // parada: con el giro del robot (giroscopio); con epscorr=1 y el laser viendo el
+  // tubo, con el angulo corregido por el error de rumbo
   float recorrido = (USAR_EPS && laserOK) ? anguloTubo : (phiDeg - phiInicioOrbita);
   // la rampa de parada dura RAMPA_S y el robot sigue girando mientras baja la
   // amplitud (~la mitad de la rampa a velocidad plena): se anticipa la parada
@@ -685,16 +712,17 @@ void pasoOrbita() {
   if (fabs(recorrido) + anticipo >= PHI_OBJ) {
     orbitaActiva = false;
     marchaActiva = false;                               // rampa de parada de 1 s
-    mensajeWifi("OK orbita terminada: alrededor del tubo=" + String(anguloTubo, 1) +
-                " (giro del robot phi=" + String(phiDeg - phiInicioOrbita, 1) + ") dist=" +
-                String(distFilt, 1) + " cm");
+    mensajeWifi("OK orbita terminada: giro del robot phi=" + String(phiDeg - phiInicioOrbita, 1) +
+                " (con la correccion eps seria " + String(anguloTubo, 1) + "; parada por " +
+                ((USAR_EPS && laserOK) ? "eps" : "phi") + ") dist=" + String(distFilt, 1) + " cm");
   }
 }
 
 String resumenOrbita() {
   uint8_t k = ACTUADOR;
   return String("actuador=") + (k == 0 ? "damp" : "ddesf") + " dref=" + String(DREF, 1) +
-         " wref=" + String(WREF, 1) + " desforb=" + String(DESFASE_ORBITA, 0) + " u0=" + String(U0[k], 0) +
+         " vel=" + String(VEL_AVANCE, 1) + " wref=" + String(WREF, 2) + (wrefManual ? "(a mano)" : "") +
+         " kuff=" + String(KUFF, 4) + " desforb=" + String(DESFASE_ORBITA, 0) + " u0=" + String(baseActuador(WREF), 0) +
          " umin=" + String(UMIN[k], 0) + " umax=" + String(UMAX[k], 0) +
          " kpw=" + String(KPW, 1) + " kiw=" + String(KIW, 1) +
          " kpe=" + String(KPE, 2) + " kde=" + String(KDE, 2) + " kie=" + String(KIE, 3) +
@@ -913,12 +941,19 @@ void aplicarComando(String linea) {
                                                : "0: ref y theta en grados nominales del servo (como antes)"));
     return;
   }
-  if (clave == "vel") {                     // velocidad de avance -> wref para el dref actual
+  if (clave == "vel") {                     // velocidad de avance -> wref al encender la orbita
+    VEL_AVANCE = constrain(val, 0.5, 12.0);
+    wrefManual = false;
     float R = 5.75 + DREF + 6.0;            // cm, del centro del tubo al centro del robot
-    float sg = (WREF > 0.0) ? 1.0 : -1.0;   // conserva el sentido de giro (por defecto horario)
-    WREF = constrain(sg * constrain(val, 0.5, 12.0) / R * 180.0 / PI, -30.0, 30.0);
-    mensajeWifi("OK vel=" + String(val, 1) + " cm/s con dref=" + String(DREF, 1) + " (radio " + String(R, 1) +
-                " cm) -> wref=" + String(WREF, 2) + " grados/s; una vuelta en " + String(360.0 / fabs(WREF), 0) + " s");
+    float w = VEL_AVANCE / R * 180.0 / PI;
+    mensajeWifi("OK vel=" + String(VEL_AVANCE, 1) + " cm/s: con dref=" + String(DREF, 1) + " (radio " + String(R, 1) +
+                " cm) la orbita usara wref=-" + String(w, 2) + " grados/s; una vuelta en " + String(360.0 / w, 0) + " s");
+    return;
+  }
+  if (clave == "control") {                 // juego de ganancias del lazo de distancia
+    if (val != 0) { KPE = 0.30; KDE = 5.0; KIE = 0.03; WLIM = 5.0; }
+    else          { KPE = 0.14; KDE = 2.0; KIE = 0.02; WLIM = 3.0; }
+    mensajeWifi(String("OK control=") + (val != 0 ? "1 (ajustado con el modelo)" : "0 (el del 28-oct)") + ": " + resumenOrbita());
     return;
   }
 
@@ -963,7 +998,9 @@ void aplicarComando(String linea) {
       epsInicio = 0.0; epsAhora = 0.0; epsInicioListo = false; anguloTubo = 0.0;
       wFilt = hayGiro ? psiDotDeg : 0.0;
       if (ACTUADOR == 1) { DESFASE = DESFASE_ORBITA; DAMP = 0.0; }
-      aplicarActuador(U0[ACTUADOR]);
+      if (!wrefManual)                               // giro que corresponde a vel y dref (horario)
+        WREF = -constrain(VEL_AVANCE / (5.75 + DREF + 6.0) * 180.0 / PI, 1.0, 30.0);
+      aplicarActuador(baseActuador(WREF));
       if (escalaMarcha <= 0.0) faseMarcha = 0.0;
       marchaActiva = true;
     } else {
@@ -980,7 +1017,8 @@ void aplicarComando(String linea) {
   else if (clave == "u0")      { U0[ACTUADOR] = val; }
   else if (clave == "umin")    { UMIN[ACTUADOR] = val; }
   else if (clave == "umax")    { UMAX[ACTUADOR] = val; }
-  else if (clave == "wref")    { WREF = constrain(val, -30.0, 30.0); }
+  else if (clave == "wref")    { WREF = constrain(val, -30.0, 30.0); wrefManual = true; }
+  else if (clave == "kuff")    { KUFF = constrain(val, 0.0, 0.2); }
   else if (clave == "desforb") { DESFASE_ORBITA = constrain(val, -180.0, 180.0); }
   else if (clave == "kpw")     { KPW = constrain(val, 0.0, 50.0); }
   else if (clave == "kiw")     { KIW = constrain(val, 0.0, 100.0); }
@@ -1291,7 +1329,7 @@ void loopInterno() {
     bufferEntradaWifi = "";
     mensajeWifi("Ultimo reinicio de la ESP principal: " + ESP.getResetReason() +
                 " (Brownout/Power On a mitad de prueba = se cayo el voltaje)");
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, epscorr=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, control=1|0, epscorr=");
     mensajeWifi(String("Sensores caracterizados el 16-nov: mapa=") + (mapaReal ? "1" : "0") + " (ref y theta en grados " +
                 (mapaReal ? "REALES" : "nominales") + "), escgiro=" + String(ESCALA_GIRO, 4) +
                 ", laser a=" + String(LASER_A, 4) + " b=" + String(LASER_B, 3));

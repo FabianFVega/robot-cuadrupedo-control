@@ -1,0 +1,48 @@
+=== Orbita con los sensores caracterizados (16-nov) ===
+Marcha nominal: V = 4.0 cm/s, giro = 0.0478 grados/s por grado de ddesf (25-oct, volver a medir)
+  [28-oct] escala=1.0 laser=0.891,0.5 wref=-8.5 kuff=0.0000 kpe=0.14 kde=2.0 kie=0.02 wlim=3.0
+  [16-nov] escala=1.0165 laser=0.9721,-1.047 vel=4.0 kuff=0.0478 kpe=0.14 kde=2.0 kie=0.02 wlim=3.0
+  [16-nov + control=1] escala=1.0165 laser=0.9721,-1.047 vel=4.0 kuff=0.0478 kpe=0.3 kde=5.0 kie=0.03 wlim=5.0
+
+A) SOLO LOS SENSORES: robot nominal, bien puesto en la salida y con el mismo control (16-nov);
+   lo unico que cambia es si el firmware corrige o no el giroscopio y el laser
+   Angulo recorrido alrededor del tubo con dref = 15 cm: error medio (s) en grados
+   objetivo |  sin corregir   | sensores corregidos
+       90   |   +2.2 (1.2)   |   +1.8 (1.1)
+      180   |   +6.0 (1.6)   |   +2.8 (1.6)
+      270   |   +2.3 (2.1)   |   -2.2 (2.6)
+      360   |   +4.0 (2.9)   |   -1.8 (2.8)
+   Distancia lateral real media en una vuelta de 360 (cm) y error contra dref
+   dref |  sin corregir   | sensores corregidos
+     10 |    9.4 (-0.6)   |   10.0 (-0.0)
+     15 |   14.5 (-0.5)   |   14.8 (-0.2)
+     20 |   19.8 (-0.2)   |   19.6 (-0.4)
+     25 |   24.9 (-0.1)   |   24.3 (-0.7)
+
+B) ROBOT REAL (cada corrida distinta: V +-10 %, KU +-15 %, giro propio +-1.0 grados/s,
+   salida +-1.5 cm y +-5.0 grados de rumbo), 60 corridas por caso
+   Angulo recorrido alrededor del tubo, dref = 15 cm: error medio (s) en grados
+   objetivo |               28-oct |               16-nov |   16-nov + control=1
+       90   |        -6.1 (14.2)   |        -4.0 (12.0)   |        -1.8 (12.8)  
+      180   |        +9.7 (12.9)   |        +5.2 (10.1)   |        +1.6 ( 8.6)  
+      270   |        +4.3 ( 9.1)   |        -1.9 ( 5.4)   |        -0.7 ( 7.5)  
+      360   |        -5.3 (12.3)   |        -3.8 ( 6.9)   |        -0.8 ( 6.1)  
+   Vuelta de 360: error RMS de la distancia (cm), % del tiempo sin laser y vueltas fallidas
+   (fallida = se aleja mas de 15 cm de dref o toca el tubo)
+   dref |                   28-oct |                   16-nov |       16-nov + control=1
+     10 |   4.1 cm   12 %   6/60   |   2.8 cm    9 %   5/60   |   3.5 cm   15 %  10/60  
+     15 |   4.2 cm   22 %   6/60   |   2.8 cm   12 %   3/60   |   2.2 cm    6 %   2/60  
+     20 |   8.3 cm   61 %  18/60   |   4.3 cm   28 %   7/60   |   2.8 cm   13 %   4/60  
+     25 |  11.8 cm   78 %  25/60   |   4.5 cm   26 %  11/60   |   3.5 cm   18 %   2/60  
+   De donde sale la dispersion del angulo (16-nov + control=1, dref 15): quitando una causa a la vez
+     todas las causas                   s(90) = 12.8   s(360) =  6.1
+     sin error de rumbo al ponerlo      s(90) =  8.4   s(360) =  3.3
+     sin error de distancia al ponerlo  s(90) = 11.4   s(360) =  7.7
+     sin variar V ni KU                 s(90) = 10.8   s(360) =  6.4
+     solo el error de los sensores      s(90) =  1.2   s(360) =  3.2
+
+C) Carga de las rodillas con 395.2 g (trote: apoyan 2 patas, 1.94 N cada una)
+   SUPUESTOS: tibia de 5.5 cm; MG90S con 1.8 kg*cm de par maximo
+   pata a 10 grados de la vertical:  18.5 mN*m = 0.19 kg*cm  (10 % del par maximo)
+   pata a 20 grados de la vertical:  36.5 mN*m = 0.37 kg*cm  (21 % del par maximo)
+   pata a 30 grados de la vertical:  53.3 mN*m = 0.54 kg*cm  (30 % del par maximo)
