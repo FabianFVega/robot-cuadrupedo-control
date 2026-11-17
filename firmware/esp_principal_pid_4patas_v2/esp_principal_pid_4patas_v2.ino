@@ -56,6 +56,16 @@
       modo=pid                    lazo cerrado
       modo=abierto                solo feedforward (por defecto al encender): sirve para
                                   verificar la calibracion y para comparar
+      --- 16-nov, caracterizacion de sensores (docs/Caracterizacion_de_sensores.xlsx) ---
+      mapa=1 / mapa=0             usa / no usa la tabla de ANGULO REAL de cada rodilla
+                                  (con mapa=1, ref= y theta son grados reales del transportador)
+      real1=v220,...,v310         tabla de angulo real de una pata (10 valores: el angulo
+                                  real cuando el sensor marca 220, 230, ..., 310)
+      escgiro=1.0165              escala del giroscopio (angulo real / angulo leido)
+      lasera=0.9721  laserb=-1.047  recta del laser: cm reales = a*lectura cruda + b
+      vel=4                       velocidad de avance (cm/s): calcula wref para el dref actual
+      epscorr=0 / 1               parada de la orbita solo con el giroscopio / con la
+                                  correccion por acercarse o alejarse del tubo
   Protocolo ESP -> Python (igual que antes, 17 campos por linea):
       t_ms, ref1,theta1,error1,write1, ..., ref4,theta4,error4,write4,
       giro_dps, phi_deg, dist_cm   (20 campos desde el 7-oct)
@@ -152,6 +162,69 @@ float linealizar(uint8_t p, float y) {
   float w = TABLA_W0 + TABLA_PASO * i;
   if (fabs(d) > 1e-3) w += TABLA_PASO * (y - t[i]) / d;   // fuera de la tabla: extrapola
   return THETA_W0[p] + GRADOS_POR_WRITE[p] * w;
+}
+
+// ---------------------------------------------------------------
+// ANGULO REAL de cada rodilla (16-nov, caracterizacion con transportador)
+// La tabla de arriba deja la lectura del AS5600 en "grados nominales del servo"
+// (theta = THETA_W0 + 0.6 * write). Pero 0.6 grados por unidad de write es el
+// valor de catalogo: medido con el transportador, cada rodilla gira entre 0.50 y
+// 0.56 grados por unidad, y con ref=270 no queda vertical:
+//      FI 268.0   FD 273.5   TI 271.0   TD 275.0
+// y con amp=20 las patas recorrian +-18.5, +-17.0, +-18.8 y +-17.5 grados.
+// realTab guarda, para cada pata, el angulo REAL cuando el sensor marca
+// 220, 230, ..., 310 (10 pruebas por punto, modo pid). Con mapa=1:
+//   - la lectura se pasa a grados reales antes del PID y de la telemetria;
+//   - la referencia (grados reales) se pasa a "grados del sensor" antes de
+//     calcular el write. Asi ref=270 es vertical de verdad en las 4 patas y
+//     amp=20 son 20 grados reales en las 4, en modo pid Y en modo abierto.
+// La tabla depende del servo y de como quedo montado el horn (no del AS5600):
+// 'recalibrar N' no la cambia, pero si se cambia un servo o se mueve el horn hay
+// que volver a medirla (real1..4=) o corregir con cen1..4=.
+// Solo se usa si la pata tiene su tabla de linealizacion activa: los comandos de
+// calibracion de la PC (que mandan tabN=off) siguen trabajando en grados nominales.
+// ---------------------------------------------------------------
+#define N_REAL 10
+const float REAL_S0 = 220.0, REAL_PASO = 10.0;   // el sensor marca 220, 230, ..., 310
+float realTab[NUM_PATAS][N_REAL] = {
+  {221.5, 233.5, 242.0, 250.0, 257.0, 268.0, 277.0, 287.0, 295.0, 305.0},   // FI
+  {241.0, 242.5, 246.5, 256.0, 265.0, 273.5, 280.5, 290.0, 299.0, 306.5},   // FD
+  {225.0, 233.5, 243.0, 252.0, 263.0, 271.0, 281.0, 289.5, 300.0, 309.0},   // TI
+  {232.0, 240.0, 250.0, 260.0, 268.0, 275.0, 285.0, 295.0, 302.0, 312.0}    // TD
+};
+bool mapaReal = true;
+bool usaMapa(uint8_t p) { return mapaReal && tablaOK[p]; }
+
+// grados del sensor -> grados reales (fuera de la tabla sigue con pendiente 1)
+float realDesdeSensor(uint8_t p, float sdeg) {
+  if (!usaMapa(p)) return sdeg;
+  const float* t = realTab[p];
+  float x = (sdeg - REAL_S0) / REAL_PASO;
+  if (x <= 0.0) return t[0] + (sdeg - REAL_S0);
+  if (x >= N_REAL - 1) return t[N_REAL - 1] + (sdeg - (REAL_S0 + REAL_PASO * (N_REAL - 1)));
+  int i = (int)x;
+  return t[i] + (t[i + 1] - t[i]) * (x - i);
+}
+
+// grados reales -> grados del sensor (para calcular el write).
+// En los extremos puede haber tramos casi planos (FD por debajo de 246: la pata
+// llega a su tope y el sensor sigue cambiando). Invertir ahi multiplicaria por 6
+// cualquier correccion, asi que esos tramos del borde no se invierten: desde el
+// primer tramo "sano" (mas de 0.5 grados reales por grado de sensor) hacia afuera
+// se sigue con pendiente 1.
+float sensorDesdeReal(uint8_t p, float rdeg) {
+  if (!usaMapa(p)) return rdeg;
+  const float* t = realTab[p];
+  int i0 = 0, i1 = N_REAL - 1;
+  while (i0 < N_REAL - 2 && (t[i0 + 1] - t[i0]) < 0.5 * REAL_PASO) i0++;
+  while (i1 > i0 + 1 && (t[i1] - t[i1 - 1]) < 0.5 * REAL_PASO) i1--;
+  if (rdeg <= t[i0]) return REAL_S0 + REAL_PASO * i0 + (rdeg - t[i0]);
+  if (rdeg >= t[i1]) return REAL_S0 + REAL_PASO * i1 + (rdeg - t[i1]);
+  int i = i0;
+  while (i < i1 - 1 && rdeg > t[i + 1]) i++;
+  float d = t[i + 1] - t[i];
+  float f = (d > 1e-3) ? (rdeg - t[i]) / d : 0.0;
+  return REAL_S0 + REAL_PASO * (i + f);
 }
 
 // Limites del write de las rodillas. Antes 40..140; se amplio a 10..170 para que la
@@ -301,7 +374,8 @@ void pasoMarcha() {
 // Conversiones con la calibracion de cada pata
 // ---------------------------------------------------------------
 int writeDesdeTheta(uint8_t p, float thetaDeg) {
-  float w = (thetaDeg - THETA_W0[p]) / GRADOS_POR_WRITE[p];
+  // thetaDeg viene en grados reales (si mapa=1): primero a grados del sensor
+  float w = (sensorDesdeReal(p, thetaDeg) - THETA_W0[p]) / GRADOS_POR_WRITE[p];
   return (int)lroundf(w);
 }
 
@@ -395,11 +469,23 @@ String ultimaLineaSensores = "";
 // El MPU6050 esta montado con el eje z hacia abajo: al girar a la izquierda daba
 // negativo. SIGNO_GIRO = -1 deja positivo = giro a la izquierda (antihorario).
 const float SIGNO_GIRO = -1.0;
-float psiDotDeg = 0.0;            // °/s, ya sin sesgo
+// 16-nov, caracterizacion (4 angulos x 15 giros a mano contra el transportador):
+// el angulo integrado leia 89.3 / 177.0 / 265.1 / 354.3 en 90 / 180 / 270 / 360, es
+// decir lectura = 0.9838 * real (R2 = 0.999). El MPU6050 tiene +-3 % de tolerancia de
+// escala. Corregido con 1/0.9838 el error medio queda en menos de 1 grado en los 4
+// angulos. Sin esto la orbita de 360 se pasaba unos 6 grados. Comando escgiro=.
+float ESCALA_GIRO = 1.0165;
+float psiDotDeg = 0.0;            // °/s, ya sin sesgo y con la escala corregida
 float sesgoGiro = 0.0;            // °/s
 float phiDeg = 0.0;               // ° girados (positivo = antihorario visto desde arriba)
 float distanciaCm = -1.0;         // cm (-1 = sin dato)
-const float LASER_A = 0.891, LASER_B = 0.50;   // cm reales = A*lectura + B
+// cm reales = A*lectura cruda + B. 9-oct (laser al lado izquierdo): 0.891 y 0.50.
+// 16-nov, caracterizacion con el laser ya al lado derecho (5 distancias x 15
+// pruebas): con esa recta leia 24.2 / 19.9 / 15.5 / 10.6 / 5.9 en 25 / 20 / 15 / 10 /
+// 5 cm (lectura = 0.9165*real + 1.46). Compuesta con la anterior:
+//   A = 0.891/0.9165 = 0.9721,  B = (0.50 - 1.46)/0.9165 = -1.047
+// y el error medio queda en +-0.3 cm de 5 a 25 cm. Comandos lasera= y laserb=.
+float LASER_A = 0.9721, LASER_B = -1.047;
 bool  hayGiro = false;
 unsigned long nSesgo = 0;
 double sumaSesgo = 0.0;
@@ -465,12 +551,11 @@ void leerNavegacion(const String &linea) {
       sesgoGiro += (gdeg - sesgoGiro) * (0.02 / 5.0);
       if (fabs(sesgoGiro) < 5.0) sesgoBueno = sesgoGiro;
     }
-    psiDotDeg = gdeg - sesgoGiro;
+    psiDotDeg = (gdeg - sesgoGiro) * ESCALA_GIRO;
     hayGiro = true;
   }
   float d = parsearCampo(linea, "distancia=");
-  // calibracion contra regla (9-oct): leia 5.2/10.35/16.25/22.3/27.25 en 5/10/15/20/25 cm
-  // -> real = 0.891*lectura + 0.50 (error < 0.4 cm)
+  // calibracion contra regla (ver LASER_A y LASER_B)
   distanciaCm = (d > VALOR_NO_DISPONIBLE + 1.0) ? LASER_A * d * 100.0 + LASER_B : -1.0;
 }
 
@@ -527,6 +612,14 @@ bool  laserOK = false;
 float epsInicio = 0.0, epsAhora = 0.0;
 bool  epsInicioListo = false;
 float anguloTubo = 0.0;
+// 16-nov: por defecto la parada vuelve a ser SOLO con el giroscopio (ya con la
+// escala corregida). El 28-oct la correccion eps dio -378.6 contra phi = -355.1:
+// 23 grados de diferencia que no son creibles. eps sale de la DERIVADA del laser
+// (ruido de 0.2 a 0.6 cm segun la caracterizacion, y eps de partida tomado de una
+// sola muestra), asi que mete mas error del que quita. El giroscopio corregido
+// tiene error medio menor a 1 grado. epscorr=1 la vuelve a activar para comparar;
+// el angulo corregido se sigue calculando y mostrando en 'estado'.
+bool  USAR_EPS = false;
 
 void aplicarActuador(float u) {
   if (ACTUADOR == 0) DAMP = u; else DDESF = u;
@@ -585,7 +678,7 @@ void pasoOrbita() {
   uOrbita = constrain(U0[k] + iW + KPW * ew, UMIN[k], UMAX[k]);
   aplicarActuador(uOrbita);
   // parada: con el angulo alrededor del tubo si el laser ve el tubo, si no con phi
-  float recorrido = laserOK ? anguloTubo : (phiDeg - phiInicioOrbita);
+  float recorrido = (USAR_EPS && laserOK) ? anguloTubo : (phiDeg - phiInicioOrbita);
   // la rampa de parada dura RAMPA_S y el robot sigue girando mientras baja la
   // amplitud (~la mitad de la rampa a velocidad plena): se anticipa la parada
   float anticipo = fabs(wFilt) * RAMPA_S * 0.5;
@@ -605,7 +698,8 @@ String resumenOrbita() {
          " umin=" + String(UMIN[k], 0) + " umax=" + String(UMAX[k], 0) +
          " kpw=" + String(KPW, 1) + " kiw=" + String(KIW, 1) +
          " kpe=" + String(KPE, 2) + " kde=" + String(KDE, 2) + " kie=" + String(KIE, 3) +
-         " wlim=" + String(WLIM, 1) + " dmax=" + String(DMAX_ORB, 0) + " phiobj=" + String(PHI_OBJ, 0);
+         " wlim=" + String(WLIM, 1) + " dmax=" + String(DMAX_ORB, 0) + " phiobj=" + String(PHI_OBJ, 0) +
+         " epscorr=" + String(USAR_EPS ? 1 : 0);
 }
 
 String estadoOrbita() {
@@ -649,7 +743,8 @@ void procesarLineaSensores(String linea) {
   theta[TD] = parsearCampo(linea, "theta4=");
   leerNavegacion(linea);
   for (uint8_t p = 0; p < NUM_PATAS; p++)         // angulo lineal si hay tabla
-    if (theta[p] > VALOR_NO_DISPONIBLE + 1.0) theta[p] = filtrarLectura(p, linealizar(p, theta[p]));
+    if (theta[p] > VALOR_NO_DISPONIBLE + 1.0)     // el filtro trabaja en grados del sensor; al final, grados reales
+      theta[p] = realDesdeSensor(p, filtrarLectura(p, linealizar(p, theta[p])));
   ultimoDatoRecibido = millis();
 }
 
@@ -694,8 +789,8 @@ void mensajeWifi(const String &m) {        // lineas que empiezan con '#' = mens
 }
 
 void avisarSiFueraDeRango(uint8_t p, float r) {
-  float a = THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MIN;
-  float b = THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MAX;
+  float a = realDesdeSensor(p, THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MIN);
+  float b = realDesdeSensor(p, THETA_W0[p] + GRADOS_POR_WRITE[p] * WRITE_MAX);
   float lo = min(a, b), hi = max(a, b);
   if (r < lo || r > hi) {
     mensajeWifi("AVISO pata " + String(p + 1) + ": ref " + String(r, 1) +
@@ -784,8 +879,48 @@ void aplicarComando(String linea) {
                 String(vals[N_TABLA - 1], 1));
     return;
   }
+  // tabla de angulo real: real1=v220,v230,...,v310 (10 valores, crecientes)
+  if (clave.length() == 5 && clave.startsWith("real")) {
+    int p = clave.charAt(4) - '1';
+    if (p < 0 || p >= NUM_PATAS) { mensajeWifi("formato: real1=10 valores (angulo real con el sensor en 220, 230, ..., 310)"); return; }
+    float vals[N_REAL];
+    int n = 0, desde = 0;
+    while (n < N_REAL) {
+      int coma = v.indexOf(',', desde);
+      String item = (coma == -1) ? v.substring(desde) : v.substring(desde, coma);
+      item.trim();
+      if (item.length() == 0) break;
+      vals[n++] = item.toFloat();
+      if (coma == -1) break;
+      desde = coma + 1;
+    }
+    if (n != N_REAL) { mensajeWifi("tabla real con " + String(n) + " valores, se esperaban 10"); return; }
+    for (int i = 1; i < N_REAL; i++)
+      if (vals[i] <= vals[i - 1]) { mensajeWifi("tabla real no creciente en el valor " + String(i + 1) + ": no se carga"); return; }
+    for (int i = 0; i < N_REAL; i++) realTab[p][i] = vals[i];
+    reiniciarControlador();
+    mensajeWifi("OK tabla de angulo real pata " + String(p + 1) + ": " + String(vals[0], 1) + " .. " +
+                String(vals[N_REAL - 1], 1) + " (con el sensor en 270 -> " + String(vals[5], 1) + " reales)");
+    return;
+  }
   if (!esNumero(v)) { mensajeWifi("valor no numerico en: " + linea); return; }
   float val = v.toFloat();
+
+  if (clave == "mapa") {
+    mapaReal = (val != 0);
+    reiniciarControlador();
+    mensajeWifi(String("OK mapa=") + (mapaReal ? "1: ref y theta en grados REALES (tabla del 16-nov)"
+                                               : "0: ref y theta en grados nominales del servo (como antes)"));
+    return;
+  }
+  if (clave == "vel") {                     // velocidad de avance -> wref para el dref actual
+    float R = 5.75 + DREF + 6.0;            // cm, del centro del tubo al centro del robot
+    float sg = (WREF > 0.0) ? 1.0 : -1.0;   // conserva el sentido de giro (por defecto horario)
+    WREF = constrain(sg * constrain(val, 0.5, 12.0) / R * 180.0 / PI, -30.0, 30.0);
+    mensajeWifi("OK vel=" + String(val, 1) + " cm/s con dref=" + String(DREF, 1) + " (radio " + String(R, 1) +
+                " cm) -> wref=" + String(WREF, 2) + " grados/s; una vuelta en " + String(360.0 / fabs(WREF), 0) + " s");
+    return;
+  }
 
   if (clave == "marcha") {
     estadoAuto = 2;                                // el usuario toma el control
@@ -855,6 +990,10 @@ void aplicarComando(String linea) {
   else if (clave == "wlim")    { WLIM = constrain(val, 0.0, 15.0); }
   else if (clave == "dmax")    { DMAX_ORB = constrain(val, 10.0, 60.0); }
   else if (clave == "phiobj")  { PHI_OBJ = constrain(val, 0.0, 720.0); }
+  else if (clave == "escgiro") { ESCALA_GIRO = constrain(val, 0.8, 1.2); }
+  else if (clave == "lasera")  { LASER_A = constrain(val, 0.5, 1.5); }
+  else if (clave == "laserb")  { LASER_B = constrain(val, -5.0, 5.0); }
+  else if (clave == "epscorr") { USAR_EPS = (val != 0); }
   else if (clave.length() == 4 && (clave.startsWith("cen") || clave.startsWith("esc")) &&
            clave.charAt(3) >= '1' && clave.charAt(3) <= '4') {
     int p = clave.charAt(3) - '1';
@@ -945,7 +1084,7 @@ void diagnostico() {
   String s = "estado sensores: " + estado + " | " + String(bps, 0) + " B/s, " + String(lps, 0) +
              " lineas/s | control " + String(cps, 0) + " ciclos/s (deben ser 50)" +
              " | WiFi max " + String(teleMaxUs / 1000.0, 1) + " ms, paquetes descartados " + String(teleDescartada) +
-             " | modo=" + String(modoPID ? "pid" : "abierto") +
+             " | modo=" + String(modoPID ? "pid" : "abierto") + " mapa=" + String(mapaReal ? 1 : 0) +
              " | theta=" + String(theta[FI], 1) + "," + String(theta[FD], 1) + "," +
              String(theta[TI], 1) + "," + String(theta[TD], 1) +
              " | write=" + String(writeActual[FI]) + "," + String(writeActual[FD]) + "," +
@@ -973,7 +1112,8 @@ void diagnostico() {
               String(lecturasDescartadas[TD]));
   mensajeWifi("giroscopio: fuente=" + String(usaYawDot ? "yaw_dot (vertical)" : "psi_dot (eje z)") +
               " | inclinacion MPU=" + String(incMpu, 1) + " grados | sesgo=" + String(sesgoGiro, 2) +
-              " grados/s | giro=" + String(psiDotDeg, 1) + " grados/s | phi=" + String(phiDeg, 1) +
+              " grados/s | escala=" + String(ESCALA_GIRO, 4) +
+              " | giro=" + String(psiDotDeg, 1) + " grados/s | phi=" + String(phiDeg, 1) +
               " | laser: dist=" + String(distanciaCm, 1) + " cm, reinicios=" + String(reiniciosLaser) +
               " | MPU reiniciado " + String(reiniciosMpuSens) + " veces, bus I2C recuperado " + String(recupBusSens) +
               " | ESP-Sensores reiniciada " + String(reiniciosEspSensores) + " veces" +
@@ -1151,7 +1291,10 @@ void loopInterno() {
     bufferEntradaWifi = "";
     mensajeWifi("Ultimo reinicio de la ESP principal: " + ESP.getResetReason() +
                 " (Brownout/Power On a mitad de prueba = se cayo el voltaje)");
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, epscorr=");
+    mensajeWifi(String("Sensores caracterizados el 16-nov: mapa=") + (mapaReal ? "1" : "0") + " (ref y theta en grados " +
+                (mapaReal ? "REALES" : "nominales") + "), escgiro=" + String(ESCALA_GIRO, 4) +
+                ", laser a=" + String(LASER_A, 4) + " b=" + String(LASER_B, 3));
   }
   revisarComandoWifi();
   unsigned long tC = micros(); sumarSeccion(0, tC - tB);

@@ -1,0 +1,36 @@
+=== Giroscopio MPU6050 (giros a mano, 4 angulos x 15 pruebas) ===
+lectura = 0.9812*real + 0.70   |  por el origen: lectura = 0.9838*real
+ESCALA_GIRO = 1/0.9838 = 1.0165   (el giro integrado se multiplica por esto)
+real   media leida   s      error antes   error corregido
+  90      89.35     0.92     -0.65        +0.82
+ 180     177.04     3.44     -2.96        -0.04
+ 270     265.13     4.11     -4.87        -0.50
+ 360     354.33     3.28     -5.67        +0.18
+dispersion s (grados) en 90/180/270/360: [0.92 3.44 4.11 3.28]  (pruebas 9-15: [0.33 1.09 1.83 1.56])
+
+=== Laser VL53L0X (5 distancias x 15 pruebas) ===
+lectura = 0.9165*real + 1.46 cm  (lectura ya calibrada con 0.891, 0.5)
+LASER_A = 0.9721   LASER_B = -1.047   (real = A*crudo_cm + B)
+real   media leida   s      error antes   error corregido
+  25      24.19     0.60     -0.81        -0.20
+  20      19.85     0.28     -0.15        +0.07
+  15      15.48     0.17     +0.48        +0.30
+  10      10.64     0.11     +0.64        +0.02
+   5       5.88     0.09     +0.88        -0.18
+ruido del laser: s(d) ~ -0.111 + 0.0240*d cm
+
+=== AS5600 por pata: angulo del sensor (= ref en modo pid) -> angulo real ===
+FI: 221.5, 233.5, 242.0, 250.0, 257.0, 268.0, 277.0, 287.0, 295.0, 305.0
+    con ref=270 la pata queda en 268.0 (corrimiento -2.0); amp=20 pedida -> recorre 250.0..287.0 = +-18.5
+FD: 241.0, 242.5, 246.5, 256.0, 265.0, 273.5, 280.5, 290.0, 299.0, 306.5
+    con ref=270 la pata queda en 273.5 (corrimiento +3.5); amp=20 pedida -> recorre 256.0..290.0 = +-17.0
+TI: 225.0, 233.5, 243.0, 252.0, 263.0, 271.0, 281.0, 289.5, 300.0, 309.0
+    con ref=270 la pata queda en 271.0 (corrimiento +1.0); amp=20 pedida -> recorre 252.0..289.5 = +-18.8
+TD: 232.0, 240.0, 250.0, 260.0, 268.0, 275.0, 285.0, 295.0, 302.0, 312.0
+    con ref=270 la pata queda en 275.0 (corrimiento +5.0); amp=20 pedida -> recorre 260.0..295.0 = +-17.5
+
+Para el firmware (realTab, sensor 220..310 de 10 en 10):
+  {221.5, 233.5, 242.0, 250.0, 257.0, 268.0, 277.0, 287.0, 295.0, 305.0},   // FI
+  {241.0, 242.5, 246.5, 256.0, 265.0, 273.5, 280.5, 290.0, 299.0, 306.5},   // FD
+  {225.0, 233.5, 243.0, 252.0, 263.0, 271.0, 281.0, 289.5, 300.0, 309.0},   // TI
+  {232.0, 240.0, 250.0, 260.0, 268.0, 275.0, 285.0, 295.0, 302.0, 312.0},   // TD
