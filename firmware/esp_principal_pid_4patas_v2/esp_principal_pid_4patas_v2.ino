@@ -66,7 +66,10 @@
       vel=4                       velocidad de avance (cm/s): al encender la orbita se calcula
                                   wref = vel / radio para el dref pedido (wref= lo fija a mano)
       kuff=0.0478                 prealimentacion: grados/s que gira el robot por cada grado de
-                                  ddesf (ddesf de partida = wref/kuff). kuff=0 -> u0 fijo, como antes
+                                  ddesf (ddesf de partida = wref/kuff). kuff=0 -> u0 fijo, como antes.
+                                  Con signo: negativo si ddesf<0 hace girar a la izquierda (+)
+      orbsentido=-1 / 1           orbita horaria (adelante, tubo a la derecha) / antihoraria
+                                  (hacia atras con desforb=45 y el laser a la derecha)
       control=1 / control=0       lazo de distancia ajustado con el modelo (kpe 0.3, kde 5,
                                   kie 0.03, wlim 5) / el del 28-oct (0.14, 2, 0.02, 3)
       epscorr=0 / 1               parada de la orbita solo con el giroscopio / con la
@@ -616,6 +619,11 @@ float DESFASE_ORBITA = -45.0; // desfase base durante la orbita con ddesf (desfo
 float VEL_AVANCE = 4.0;
 float KUFF = 0.0478;
 bool  wrefManual = false;
+// 19-nov: sentido de la orbita visto desde arriba. -1 = horario (tubo a la derecha
+// del robot caminando HACIA ADELANTE, como el 25-oct). +1 = antihorario: es el caso
+// del robot caminando HACIA ATRAS con el laser a la derecha (desforb=45): el tubo
+// queda a la izquierda del sentido de avance. Comando orbsentido=1|-1.
+float SENTIDO_ORB = -1.0;
 float phiInicioOrbita = 0.0;
 float distFilt = -1.0, dDistFilt = 0.0;
 float wFilt = 0.0, iW = 0.0, iE = 0.0, wObj = 0.0, uOrbita = 0.0;
@@ -646,7 +654,7 @@ void aplicarActuador(float u) {
 
 // valor de partida del actuador para un giro pedido (grados/s)
 float baseActuador(float giro) {
-  if (ACTUADOR == 1 && KUFF > 0.0) return constrain(giro / KUFF, UMIN[1], UMAX[1]);
+  if (ACTUADOR == 1 && fabs(KUFF) > 1e-4) return constrain(giro / KUFF, UMIN[1], UMAX[1]);
   return U0[ACTUADOR];
 }
 
@@ -722,7 +730,8 @@ String resumenOrbita() {
   uint8_t k = ACTUADOR;
   return String("actuador=") + (k == 0 ? "damp" : "ddesf") + " dref=" + String(DREF, 1) +
          " vel=" + String(VEL_AVANCE, 1) + " wref=" + String(WREF, 2) + (wrefManual ? "(a mano)" : "") +
-         " kuff=" + String(KUFF, 4) + " desforb=" + String(DESFASE_ORBITA, 0) + " u0=" + String(baseActuador(WREF), 0) +
+         " kuff=" + String(KUFF, 4) + " orbsentido=" + String(SENTIDO_ORB > 0 ? "+1(antihorario)" : "-1(horario)") +
+         " desforb=" + String(DESFASE_ORBITA, 0) + " u0=" + String(baseActuador(WREF), 0) +
          " umin=" + String(UMIN[k], 0) + " umax=" + String(UMAX[k], 0) +
          " kpw=" + String(KPW, 1) + " kiw=" + String(KIW, 1) +
          " kpe=" + String(KPE, 2) + " kde=" + String(KDE, 2) + " kie=" + String(KIE, 3) +
@@ -947,7 +956,7 @@ void aplicarComando(String linea) {
     float R = 5.75 + DREF + 6.0;            // cm, del centro del tubo al centro del robot
     float w = VEL_AVANCE / R * 180.0 / PI;
     mensajeWifi("OK vel=" + String(VEL_AVANCE, 1) + " cm/s: con dref=" + String(DREF, 1) + " (radio " + String(R, 1) +
-                " cm) la orbita usara wref=-" + String(w, 2) + " grados/s; una vuelta en " + String(360.0 / w, 0) + " s");
+                " cm) la orbita usara wref=" + String(SENTIDO_ORB * w, 2) + " grados/s; una vuelta en " + String(360.0 / w, 0) + " s");
     return;
   }
   if (clave == "control") {                 // juego de ganancias del lazo de distancia
@@ -999,7 +1008,7 @@ void aplicarComando(String linea) {
       wFilt = hayGiro ? psiDotDeg : 0.0;
       if (ACTUADOR == 1) { DESFASE = DESFASE_ORBITA; DAMP = 0.0; }
       if (!wrefManual)                               // giro que corresponde a vel y dref (horario)
-        WREF = -constrain(VEL_AVANCE / (5.75 + DREF + 6.0) * 180.0 / PI, 1.0, 30.0);
+        WREF = SENTIDO_ORB * constrain(VEL_AVANCE / (5.75 + DREF + 6.0) * 180.0 / PI, 1.0, 30.0);
       aplicarActuador(baseActuador(WREF));
       if (escalaMarcha <= 0.0) faseMarcha = 0.0;
       marchaActiva = true;
@@ -1018,7 +1027,10 @@ void aplicarComando(String linea) {
   else if (clave == "umin")    { UMIN[ACTUADOR] = val; }
   else if (clave == "umax")    { UMAX[ACTUADOR] = val; }
   else if (clave == "wref")    { WREF = constrain(val, -30.0, 30.0); wrefManual = true; }
-  else if (clave == "kuff")    { KUFF = constrain(val, 0.0, 0.2); }
+  // kuff con signo: negativo si un ddesf negativo hace girar en sentido positivo
+  // (antihorario). kuff=0 apaga la prealimentacion (u0 fijo).
+  else if (clave == "kuff")    { KUFF = constrain(val, -0.2, 0.2); }
+  else if (clave == "orbsentido") { SENTIDO_ORB = (val >= 0) ? 1.0 : -1.0; wrefManual = false; }
   else if (clave == "desforb") { DESFASE_ORBITA = constrain(val, -180.0, 180.0); }
   else if (clave == "kpw")     { KPW = constrain(val, 0.0, 50.0); }
   else if (clave == "kiw")     { KIW = constrain(val, 0.0, 100.0); }
@@ -1329,7 +1341,7 @@ void loopInterno() {
     bufferEntradaWifi = "";
     mensajeWifi("Ultimo reinicio de la ESP principal: " + ESP.getResetReason() +
                 " (Brownout/Power On a mitad de prueba = se cayo el voltaje)");
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, control=1|0, epscorr=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, orbsentido=, control=1|0, epscorr=");
     mensajeWifi(String("Sensores caracterizados el 16-nov: mapa=") + (mapaReal ? "1" : "0") + " (ref y theta en grados " +
                 (mapaReal ? "REALES" : "nominales") + "), escgiro=" + String(ESCALA_GIRO, 4) +
                 ", laser a=" + String(LASER_A, 4) + " b=" + String(LASER_B, 3));

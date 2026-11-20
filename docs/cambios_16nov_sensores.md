@@ -70,3 +70,15 @@ distancia mínima, así queda tangente)
 - `dref=15`, `phiobj=90`, `phi=0`, `orbita=1`. Tres veces por ángulo: 90, 180, 270, 360.
 - Repetir con `control=1`.
 - Luego `dref=10`, `20` y `25`.
+
+## 19-nov: marcha hacia atrás y sentido de la órbita
+
+Pruebas en el piso, `amp=20`, `frec=3`, `ddesf=0`, `modo=abierto`, unos 10 s:
+
+| Marcha | Avance | phi |
+|---|---|---|
+| `desfase=45` (camina hacia atrás) | 47–59 cm (media 52) | +14.5 a +23.7° |
+| `desfase=180`, `esc1=esc2=2` | 38–42 cm | −6.8° |
+
+Antes (18-nov, `desfase=-45`) avanzaba 17 cm. Comando nuevo `orbsentido=1|-1` y `kuff`
+con signo, para orbitar caminando hacia atrás con el láser a la derecha (órbita antihoraria).
