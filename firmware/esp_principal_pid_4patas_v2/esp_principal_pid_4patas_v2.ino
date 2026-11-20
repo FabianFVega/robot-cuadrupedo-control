@@ -328,7 +328,14 @@ float FREC = 3.0;          // Hz (ciclos de paso por segundo); 3 Hz es la que me
 float CENTRO = 270.0;      // grados (270 = pata vertical)
 int   SENTIDO = 1;         // +1 / -1: invierte el sentido de avance
 const float RAMPA_S = 1.0; // s para llegar a la amplitud completa
-const float FASE_PATA[NUM_PATAS] = {0.0, PI, PI, 0.0};   // FI, FD, TI, TD
+// Fase de cada pata (rad). 20-nov: ya no es constante, para poder probar otros
+// pasos (comando andar= o fase1..4= en grados):
+//   trote     (diagonales juntas: FI+TD y FD+TI)      0, 180, 180,   0  (por defecto)
+//   ambladura (mismo lado juntas: FI+TI y FD+TD)      0, 180,   0, 180  (= trote con desfase=180)
+//   salto     (delanteras juntas y traseras juntas)    0,   0, 180, 180  ("bound")
+//   brinco    (las cuatro juntas)                      0,   0,   0,   0  ("pronk")
+// desfase= y ddesf= se siguen sumando a las traseras encima de estas fases.
+float FASE_PATA[NUM_PATAS] = {0.0, PI, PI, 0.0};   // FI, FD, TI, TD
 const bool  PATA_TRASERA[NUM_PATAS] = {false, false, true, true};
 // desfase= (grados): atrasa las traseras respecto a las delanteras. Con 0 el
 // trote es simetrico en el tiempo y "sentido" no cambia nada (invertir el seno
@@ -940,6 +947,21 @@ void aplicarComando(String linea) {
                 String(vals[N_REAL - 1], 1) + " (con el sensor en 270 -> " + String(vals[5], 1) + " reales)");
     return;
   }
+  if (clave == "andar") {                   // tipo de paso: fases de las 4 patas
+    v.toLowerCase();
+    float f[NUM_PATAS];
+    if      (v == "trote")     { f[0] = 0; f[1] = 180; f[2] = 180; f[3] = 0;   }
+    else if (v == "ambladura") { f[0] = 0; f[1] = 180; f[2] = 0;   f[3] = 180; }
+    else if (v == "salto")     { f[0] = 0; f[1] = 0;   f[2] = 180; f[3] = 180; }
+    else if (v == "brinco")    { f[0] = 0; f[1] = 0;   f[2] = 0;   f[3] = 0;   }
+    else { mensajeWifi("andar=trote | ambladura | salto | brinco"); return; }
+    for (uint8_t p = 0; p < NUM_PATAS; p++) FASE_PATA[p] = f[p] * PI / 180.0;
+    mensajeWifi("OK andar=" + v + ": fases FI,FD,TI,TD = " + String(f[0], 0) + "," + String(f[1], 0) + "," +
+                String(f[2], 0) + "," + String(f[3], 0) + " grados (desfase=" + String(DESFASE, 0) +
+                " y ddesf=" + String(DDESF, 0) + " se suman a las traseras)");
+    return;
+  }
+
   if (!esNumero(v)) { mensajeWifi("valor no numerico en: " + linea); return; }
   float val = v.toFloat();
 
@@ -1044,6 +1066,13 @@ void aplicarComando(String linea) {
   else if (clave == "lasera")  { LASER_A = constrain(val, 0.5, 1.5); }
   else if (clave == "laserb")  { LASER_B = constrain(val, -5.0, 5.0); }
   else if (clave == "epscorr") { USAR_EPS = (val != 0); }
+  else if (clave.length() == 5 && clave.startsWith("fase") && clave.charAt(4) >= '1' && clave.charAt(4) <= '4') {
+    int p = clave.charAt(4) - '1';
+    FASE_PATA[p] = constrain(val, -360.0, 360.0) * PI / 180.0;
+    mensajeWifi("OK fases FI,FD,TI,TD = " + String(FASE_PATA[0] * 180.0 / PI, 0) + "," + String(FASE_PATA[1] * 180.0 / PI, 0) +
+                "," + String(FASE_PATA[2] * 180.0 / PI, 0) + "," + String(FASE_PATA[3] * 180.0 / PI, 0) + " grados");
+    return;
+  }
   else if (clave.length() == 4 && (clave.startsWith("cen") || clave.startsWith("esc")) &&
            clave.charAt(3) >= '1' && clave.charAt(3) <= '4') {
     int p = clave.charAt(3) - '1';
@@ -1341,7 +1370,7 @@ void loopInterno() {
     bufferEntradaWifi = "";
     mensajeWifi("Ultimo reinicio de la ESP principal: " + ESP.getResetReason() +
                 " (Brownout/Power On a mitad de prueba = se cayo el voltaje)");
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, orbsentido=, control=1|0, epscorr=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, orbsentido=, control=1|0, epscorr=, andar=trote|ambladura|salto|brinco, fase1..4=");
     mensajeWifi(String("Sensores caracterizados el 16-nov: mapa=") + (mapaReal ? "1" : "0") + " (ref y theta en grados " +
                 (mapaReal ? "REALES" : "nominales") + "), escgiro=" + String(ESCALA_GIRO, 4) +
                 ", laser a=" + String(LASER_A, 4) + " b=" + String(LASER_B, 3));
