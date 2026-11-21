@@ -1,5 +1,25 @@
 /*
   ============================================================================
+  21-nov (PRESENTACION). Dos perfiles en el mismo codigo (PERFIL_NOV, abajo):
+    PERFIL_NOV 1 -> marcha del 20-nov: trote, amp 30, frec 2, desfase 45 (camina hacia
+                    atras), damp 0 recto; la orbita gira con DAMP (actuador=0).
+    PERFIL_NOV 0 -> lo que funciono en octubre: amp 20, frec 3, damp -6 en recto y la
+                    orbita del 25-oct (adelante, desforb -45, ddesf -180, horaria).
+  En los dos: centros de las rodillas de noviembre (servo de FD nuevo: theta_w0
+  210.0 / 312.0 / 216.0 / 324.0), mapa=0 y se IGNORA la calibracion cal1..4 que
+  manda la PC al conectar (calpc=1 la vuelve a aceptar).
+  Controladores para las pruebas:
+    rodillas (modo=pid):  pidtipo=pi-d  derivada sobre la medicion (por defecto)
+                          pidtipo=pid   PID discreto clasico, derivada sobre el error
+    orbita:  rn=0  PID en cascada (PI de giro + PD+I de distancia)
+             rn=1  perceptron en el giro (rnact=sigmoide|tanh|lineal) + PD de distancia
+             rn=2  PI de giro + MLP 2-8-1 en la distancia
+             rn=3  perceptron + MLP
+    urecto=   valor del actuador con el que camina recto (damp o ddesf)
+    kuff=     giro (grados/s) por unidad del actuador, CON SIGNO; si es negativo
+              (mas damp = giro a la derecha) el PI y el perceptron corrigen al reves
+  Pesos de las redes: pesos_redes.h (modelado/redes_orbita.py).
+  ============================================================================
   ESP8266 PRINCIPAL -- PID de las 4 rodillas (lazo cerrado real) -- VERSION 2
   Robot Cuadrupedo (ACEBOTT/QD020)
   ============================================================================
@@ -98,6 +118,10 @@
 ADC_MODE(ADC_VCC);
 #if __has_include(<core_version.h>)
 #include <core_version.h>           // ARDUINO_ESP8266_MAJOR (nucleo 3.x)
+#include "pesos_redes.h"            // 21-nov: pesos del perceptron y de la MLP
+#ifndef PERFIL_NOV
+#define PERFIL_NOV 1                // 1 = marcha del 20-nov, 0 = configuracion de octubre
+#endif
 #endif
 
 // ---------------------------------------------------------------
@@ -131,7 +155,10 @@ Servo servo_4;  // Coxa TI (fija)
 // igual al angulo medido con write = 0.
 // ---------------------------------------------------------------
 // Valores medidos con "linealizar" (1-oct 23:38) y "vertical" (2-oct 00:02):
-float THETA_W0[NUM_PATAS]         = {211.800, 336.600, 216.000, 324.000};
+// 20-nov: centros con el servo nuevo de FD (vertical en write 70) y FI en write 100.
+// Antes (octubre): 211.8, 336.6, 216.0, 324.0.
+float THETA_W0[NUM_PATAS]         = {210.000, 312.000, 216.000, 324.000};
+bool  IGNORAR_CAL_PC = true;        // la PC manda cal1..4 viejos al conectar (calpc=1 los acepta)
 float GRADOS_POR_WRITE[NUM_PATAS] = {0.6000, -0.6000, 0.6000, -0.6000};
 
 // ---------------------------------------------------------------
@@ -200,7 +227,7 @@ float realTab[NUM_PATAS][N_REAL] = {
   {225.0, 233.5, 243.0, 252.0, 263.0, 271.0, 281.0, 289.5, 300.0, 309.0},   // TI
   {232.0, 240.0, 250.0, 260.0, 268.0, 275.0, 285.0, 295.0, 302.0, 312.0}    // TD
 };
-bool mapaReal = true;
+bool mapaReal = false;             // 20-nov: la tabla de FD es del servo viejo
 bool usaMapa(uint8_t p) { return mapaReal && tablaOK[p]; }
 
 // grados del sensor -> grados reales (fuera de la tabla sigue con pendiente 1)
@@ -322,9 +349,15 @@ const unsigned long ESPERA_ARRANQUE_MS = 5000;   // tiempo para soltarlo en el p
 const float DURACION_MARCHA_S = 30.0;
 uint8_t estadoAuto = 0;                          // 0 esperando, 1 caminando, 2 terminado
 unsigned long tInicioAuto = 0;
-float AMP = 20.0;          // grados. 10 = paso corto (camino 1.22 m); 20 = paso mas largo
-float DAMP = 0.0;          // grados (positivo: patas derechas con mas amplitud)
-float FREC = 3.0;          // Hz (ciclos de paso por segundo); 3 Hz es la que mejor camino
+#if PERFIL_NOV
+float AMP = 30.0;          // 20-nov: trote amp 30, frec 2, desfase 45, damp 0 = recto (hacia atras)
+float DAMP = 0.0;          // damp 30 = gira a la derecha
+float FREC = 2.0;
+#else
+float AMP = 20.0;          // octubre: amp 20, frec 3, damp -6 = 190 cm en 30 s (14-oct)
+float DAMP = -6.0;
+float FREC = 3.0;
+#endif
 float CENTRO = 270.0;      // grados (270 = pata vertical)
 int   SENTIDO = 1;         // +1 / -1: invierte el sentido de avance
 const float RAMPA_S = 1.0; // s para llegar a la amplitud completa
@@ -341,7 +374,11 @@ const bool  PATA_TRASERA[NUM_PATAS] = {false, false, true, true};
 // trote es simetrico en el tiempo y "sentido" no cambia nada (invertir el seno
 // es lo mismo que intercambiar los pares); con +-60..90 aparece una onda
 // adelante->atras y sentido=1/-1 elige hacia donde camina.
+#if PERFIL_NOV
+float DESFASE = 45.0;
+#else
 float DESFASE = 0.0;
+#endif
 // ddesf= (grados, 20-oct): diferencia de desfase entre lados, como damp con la
 // amplitud. TI usa DESFASE + DDESF/2 y TD usa DESFASE - DDESF/2. En las pruebas
 // del 20-oct desfase=+90 camino hacia adelante (y mas rapido) y desfase=-90 hacia
@@ -595,14 +632,18 @@ void leerNavegacion(const String &linea) {
 bool  orbitaActiva = false;
 float DREF = 15.0;          // cm, distancia lateral al tubo (10..25)
 float PHI_OBJ = 360.0;      // grados a recorrer alrededor del tubo
-uint8_t ACTUADOR = 1;       // 0 = damp, 1 = ddesf
+#if PERFIL_NOV
+uint8_t ACTUADOR = 0;       // 0 = damp, 1 = ddesf. 20-nov: la marcha nueva gira con damp
+#else
+uint8_t ACTUADOR = 1;
+#endif
 //                  damp    ddesf
 // 25-oct: pruebas de marcha (20 s, lazo abierto): desfase=-45 con ddesf=-180 avanza
 // hacia ADELANTE girando horario -8.6 grados/s en un circulo que se cierra (el mas
 // cerrado de todos); con el laser a la derecha el tubo queda dentro del circulo.
 // desfase=0/+45 con ddesf=+180 giraba +8.7..9.4 grados/s pero hacia atras y en un
 // circulo grande (la orbita se abria aun con ddesf al tope). Por defecto: el horario.
-float U0[2]     = {-12.0, -180.0};   // valor de partida
+float U0[2]     = {-12.0, -180.0};   // valor de partida (solo si kuff=0)
 float UMIN[2]   = {-30.0, -240.0};
 float UMAX[2]   = { 30.0,    0.0};
 float WREF = -8.5;          // grados/s; negativo = horario (avanza con el tubo a la derecha)
@@ -623,14 +664,35 @@ float DESFASE_ORBITA = -45.0; // desfase base durante la orbita con ddesf (desfo
 //     la simulacion eso abria la orbita y el laser perdia el tubo. kuff=0 lo desactiva.
 // Los dos valores son del 25-oct: volver a medirlos (README, pruebas M1 a M3) porque
 // cambiaron el servo de TI, el peso (395.2 g) y la amplitud real de las patas.
-float VEL_AVANCE = 4.0;
+#if PERFIL_NOV
+// 21-nov: VALORES SUPUESTOS hasta medirlos (pruebas G del protocolo): vel con amp 30 a
+// 2 Hz hacia atras; damp + = giro a la derecha (negativo), ~0.3 grados/s por grado.
+float VEL_AVANCE = 5.0;
+float KUFF = -0.30;
+#else
+float VEL_AVANCE = 4.0;     // 25-oct
 float KUFF = 0.0478;
+#endif
+float URECTO[2] = {0.0, 0.0};   // damp / ddesf con el que camina recto (urecto=)
 bool  wrefManual = false;
 // 19-nov: sentido de la orbita visto desde arriba. -1 = horario (tubo a la derecha
 // del robot caminando HACIA ADELANTE, como el 25-oct). +1 = antihorario: es el caso
 // del robot caminando HACIA ATRAS con el laser a la derecha (desforb=45): el tubo
 // queda a la izquierda del sentido de avance. Comando orbsentido=1|-1.
-float SENTIDO_ORB = -1.0;
+#if PERFIL_NOV
+float SENTIDO_ORB = 1.0;     // hacia atras con el laser a la derecha: antihoraria (giro +)
+#else
+float SENTIDO_ORB = -1.0;    // hacia adelante con el laser a la derecha: horaria
+#endif
+// 21-nov: controladores de la orbita y de las rodillas
+uint8_t RN_MODO = 0;         // 0 PID, 1 perceptron (giro), 2 MLP (distancia), 3 las dos
+uint8_t RN_ACT = 1;          // perceptron: 0 sigmoide, 1 tanh, 2 lineal (= PI)
+bool  DERIV_EN_ERROR = false;  // pidtipo=pid (derivada del error) / pi-d (de la medicion)
+float uPer = 0.0;            // estado del perceptron (forma incremental)
+float ewPrev = 0.0;
+uint8_t rnPrevio = 0;
+float corrMlp = 0.0, duPer = 0.0;
+unsigned long usRedes = 0;   // tiempo de calculo de las redes (us)
 float phiInicioOrbita = 0.0;
 float distFilt = -1.0, dDistFilt = 0.0;
 float wFilt = 0.0, iW = 0.0, iE = 0.0, wObj = 0.0, uOrbita = 0.0;
@@ -661,7 +723,8 @@ void aplicarActuador(float u) {
 
 // valor de partida del actuador para un giro pedido (grados/s)
 float baseActuador(float giro) {
-  if (ACTUADOR == 1 && fabs(KUFF) > 1e-4) return constrain(giro / KUFF, UMIN[1], UMAX[1]);
+  uint8_t k = ACTUADOR;
+  if (fabs(KUFF) > 1e-4) return constrain(URECTO[k] + giro / KUFF, UMIN[k], UMAX[k]);
   return U0[ACTUADOR];
 }
 
@@ -678,6 +741,7 @@ void pasoOrbita() {
   }
   uint8_t k = ACTUADOR;
   float dt = dtCiclo;
+  usRedes = 0;
   // giro medido, filtrado 1 s
   if (hayGiro) wFilt += dt / (1.0 + dt) * (psiDotDeg - wFilt);
   // distancia creible?
@@ -697,9 +761,19 @@ void pasoOrbita() {
     float e = constrain(distFilt - DREF, -10.0, 10.0);
     iE = constrain(iE + KIE * e * dt, -IELIM, IELIM);
     corr = constrain(KPE * e + KDE * dDistFilt + iE, -WLIM, WLIM);
+    if (RN_MODO >= 2) {                                   // MLP 2-8-1 (sin integral)
+      unsigned long t0 = micros();
+      uint8_t j = (KPE > 0.2) ? 1 : 0;                    // pesos de control=1 o control=0
+      float x0 = e / RN_ED_N, x1 = constrain(dDistFilt, -6.0, 6.0) / RN_DED_N;
+      float o = MLP_B2[j];
+      for (uint8_t h = 0; h < 8; h++) o += MLP_W2[j][h] * tanh(MLP_W1[j][h][0] * x0 + MLP_W1[j][h][1] * x1 + MLP_B1[j][h]);
+      corrMlp = WLIM * tanh(o);
+      corr = corrMlp;
+      usRedes += micros() - t0;
+    }
   } else {
     tSinLaser += dt;
-    corr = iE;
+    corr = (RN_MODO >= 2) ? 0.0 : iE;
   }
   wObj = WREF + sg * corr;
   // correccion del angulo recorrido (solo con distancia creible)
@@ -715,8 +789,26 @@ void pasoOrbita() {
   // lazo interno de giro
   float ew = wObj - wFilt;
   float base = baseActuador(wObj);
-  iW = constrain(iW + KIW * ew * dt, UMIN[k] - base, UMAX[k] - base);
-  uOrbita = constrain(base + iW + KPW * ew, UMIN[k], UMAX[k]);
+  float sp = (KUFF < 0.0) ? -1.0 : 1.0;                 // signo de la planta
+  bool per = (RN_MODO == 1 || RN_MODO == 3);
+  bool perAntes = (rnPrevio == 1 || rnPrevio == 3);
+  if (per && !perAntes) { uPer = uOrbita - base; ewPrev = ew; }          // cambio sin salto
+  if (!per && perAntes) iW = (uOrbita - base) - sp * KPW * ew;
+  rnPrevio = RN_MODO;
+  if (per) {                                            // perceptron, forma incremental
+    unsigned long t0 = micros();
+    const float *w = PER_W[RN_ACT];
+    float v = w[0] + w[1] * ew / RN_EW_N + w[2] * (ew - ewPrev) / RN_DEW_N;
+    float uh = (RN_ACT == 0) ? 1.0 / (1.0 + exp(-v)) : (RN_ACT == 1) ? (tanh(v) + 1.0) / 2.0 : (v + 1.0) / 2.0;
+    duPer = sp * RN_DU_MAX * (2.0 * uh - 1.0);
+    uPer = constrain(uPer + duPer, UMIN[k] - base, UMAX[k] - base);
+    uOrbita = constrain(base + uPer, UMIN[k], UMAX[k]);
+    usRedes += micros() - t0;
+  } else {
+    iW = constrain(iW + sp * KIW * ew * dt, UMIN[k] - base, UMAX[k] - base);
+    uOrbita = constrain(base + iW + sp * KPW * ew, UMIN[k], UMAX[k]);
+  }
+  ewPrev = ew;
   aplicarActuador(uOrbita);
   // parada: con el giro del robot (giroscopio); con epscorr=1 y el laser viendo el
   // tubo, con el angulo corregido por el error de rumbo
@@ -727,10 +819,17 @@ void pasoOrbita() {
   if (fabs(recorrido) + anticipo >= PHI_OBJ) {
     orbitaActiva = false;
     marchaActiva = false;                               // rampa de parada de 1 s
+    aplicarActuador(URECTO[k]);                         // la proxima marcha sale recta
     mensajeWifi("OK orbita terminada: giro del robot phi=" + String(phiDeg - phiInicioOrbita, 1) +
                 " (con la correccion eps seria " + String(anguloTubo, 1) + "; parada por " +
                 ((USAR_EPS && laserOK) ? "eps" : "phi") + ") dist=" + String(distFilt, 1) + " cm");
   }
+}
+
+String nombreRn() {
+  const char *n[4] = {"(PID)", "(perceptron)", "(MLP)", "(perceptron+MLP)"};
+  const char *a[3] = {"sigmoide", "tanh", "lineal"};
+  return String(n[RN_MODO]) + " rnact=" + a[RN_ACT];
 }
 
 String resumenOrbita() {
@@ -743,7 +842,8 @@ String resumenOrbita() {
          " kpw=" + String(KPW, 1) + " kiw=" + String(KIW, 1) +
          " kpe=" + String(KPE, 2) + " kde=" + String(KDE, 2) + " kie=" + String(KIE, 3) +
          " wlim=" + String(WLIM, 1) + " dmax=" + String(DMAX_ORB, 0) + " phiobj=" + String(PHI_OBJ, 0) +
-         " epscorr=" + String(USAR_EPS ? 1 : 0);
+         " epscorr=" + String(USAR_EPS ? 1 : 0) + " urecto=" + String(URECTO[k], 0) +
+         " | rn=" + String(RN_MODO) + nombreRn() + " pidtipo=" + (DERIV_EN_ERROR ? "pid" : "pi-d");
 }
 
 String estadoOrbita() {
@@ -752,7 +852,9 @@ String estadoOrbita() {
          " | dist filtrada=" + String(distFilt, 1) + " cm " + (laserOK ? "(laser OK)" : "(sin tubo)") +
          " | u=" + String(uOrbita, 0) + " iE=" + String(iE, 2) +
          " | recorrido: tubo=" + String(anguloTubo, 0) + " phi=" + String(phiDeg - phiInicioOrbita, 0) +
-         " de " + String(PHI_OBJ, 0) + " (eps=" + String(epsAhora - epsInicio, 1) + ")";
+         " de " + String(PHI_OBJ, 0) + " (eps=" + String(epsAhora - epsInicio, 1) + ")" +
+         " | rn=" + String(RN_MODO) + nombreRn() + " du_per=" + String(duPer, 2) +
+         " corr_mlp=" + String(corrMlp, 2) + " redes " + String(usRedes) + " us";
 }
 
 unsigned long lineasMalSuma = 0;   // lineas descartadas por suma de verificacion
@@ -880,6 +982,10 @@ void aplicarComando(String linea) {
   }
   // calibracion en vivo: cal1=THETA_W0,GRADOS_POR_WRITE  (cal1..cal4 = FI, FD, TI, TD)
   if (clave.length() == 4 && clave.startsWith("cal")) {
+    if (IGNORAR_CAL_PC) {
+      mensajeWifi("cal ignorada (" + linea + "): se usan los centros de noviembre del firmware. calpc=1 para aceptarla");
+      return;
+    }
     int p = clave.charAt(3) - '1';
     int coma = v.indexOf(',');
     if (p < 0 || p >= NUM_PATAS || coma == -1) { mensajeWifi("formato: cal1=theta_w0,grados_por_write"); return; }
@@ -945,6 +1051,23 @@ void aplicarComando(String linea) {
     reiniciarControlador();
     mensajeWifi("OK tabla de angulo real pata " + String(p + 1) + ": " + String(vals[0], 1) + " .. " +
                 String(vals[N_REAL - 1], 1) + " (con el sensor en 270 -> " + String(vals[5], 1) + " reales)");
+    return;
+  }
+  if (clave == "pidtipo") {                 // derivada del PID de rodillas
+    v.toLowerCase();
+    if (v == "pid") DERIV_EN_ERROR = true;
+    else if (v == "pi-d" || v == "pid-d" || v == "pi_d") DERIV_EN_ERROR = false;
+    else { mensajeWifi("pidtipo=pid (derivada del error) o pidtipo=pi-d (derivada de la medicion)"); return; }
+    reiniciarControlador();
+    mensajeWifi(String("OK pidtipo=") + (DERIV_EN_ERROR ? "pid: PID discreto, derivada sobre el error"
+                                                          : "pi-d: derivada sobre la medicion (sin pico al cambiar ref)"));
+    return;
+  }
+  if (clave == "rnact") {
+    v.toLowerCase();
+    if (v == "sigmoide") RN_ACT = 0; else if (v == "tanh") RN_ACT = 1; else if (v == "lineal") RN_ACT = 2;
+    else { mensajeWifi("rnact=sigmoide | tanh | lineal"); return; }
+    mensajeWifi("OK " + nombreRn());
     return;
   }
   if (clave == "andar") {                   // tipo de paso: fases de las 4 patas
@@ -1025,7 +1148,7 @@ void aplicarComando(String linea) {
     if (orbitaActiva) {
       phiInicioOrbita = phiDeg;
       distFilt = -1.0; dDistFilt = 0.0;
-      iW = 0.0; iE = 0.0; tSinLaser = 0.0;
+      iW = 0.0; iE = 0.0; tSinLaser = 0.0; uPer = 0.0; ewPrev = 0.0; rnPrevio = RN_MODO;
       epsInicio = 0.0; epsAhora = 0.0; epsInicioListo = false; anguloTubo = 0.0;
       wFilt = hayGiro ? psiDotDeg : 0.0;
       if (ACTUADOR == 1) { DESFASE = DESFASE_ORBITA; DAMP = 0.0; }
@@ -1036,6 +1159,7 @@ void aplicarComando(String linea) {
       marchaActiva = true;
     } else {
       marchaActiva = false;
+      aplicarActuador(URECTO[ACTUADOR]);
     }
     mensajeWifi(String("OK orbita ") + (orbitaActiva ? "ENCENDIDA" : "detenida") +
                 ": " + resumenOrbita() + " desfase=" + String(DESFASE, 0) +
@@ -1051,7 +1175,10 @@ void aplicarComando(String linea) {
   else if (clave == "wref")    { WREF = constrain(val, -30.0, 30.0); wrefManual = true; }
   // kuff con signo: negativo si un ddesf negativo hace girar en sentido positivo
   // (antihorario). kuff=0 apaga la prealimentacion (u0 fijo).
-  else if (clave == "kuff")    { KUFF = constrain(val, -0.2, 0.2); }
+  else if (clave == "kuff")    { KUFF = constrain(val, -2.0, 2.0); }
+  else if (clave == "urecto")  { URECTO[ACTUADOR] = val; }
+  else if (clave == "rn")      { RN_MODO = (uint8_t)constrain((int)val, 0, 3); mensajeWifi("OK rn=" + String(RN_MODO) + nombreRn()); return; }
+  else if (clave == "calpc")   { IGNORAR_CAL_PC = (val == 0); mensajeWifi(String("OK calpc=") + (IGNORAR_CAL_PC ? "0: se ignora cal1..4 de la PC" : "1: se acepta cal1..4")); return; }
   else if (clave == "orbsentido") { SENTIDO_ORB = (val >= 0) ? 1.0 : -1.0; wrefManual = false; }
   else if (clave == "desforb") { DESFASE_ORBITA = constrain(val, -180.0, 180.0); }
   else if (clave == "kpw")     { KPW = constrain(val, 0.0, 50.0); }
@@ -1244,7 +1371,8 @@ int pasoControl(uint8_t p, float r, float y) {
   if (fabs(r - y) >= BANDA_I[p])                 // zona muerta: cerca de la referencia no integra
     integralNueva += c_i[p] * (e + e_prev[p]);
   integralNueva = constrain(integralNueva, -IMAX[p], IMAX[p]);
-  derivada[p] = c1 * derivada[p] - c2[p] * (y - y_prev[p]);
+  if (DERIV_EN_ERROR) derivada[p] = c1 * derivada[p] + c2[p] * (e - e_prev[p]);   // pidtipo=pid
+  else                derivada[p] = c1 * derivada[p] - c2[p] * (y - y_prev[p]);   // pidtipo=pi-d
 
   // 3) feedforward (la referencia) + correccion del PID
   float thetaCmd = r + KP[p] * e + integralNueva + derivada[p];
@@ -1370,7 +1498,7 @@ void loopInterno() {
     bufferEntradaWifi = "";
     mensajeWifi("Ultimo reinicio de la ESP principal: " + ESP.getResetReason() +
                 " (Brownout/Power On a mitad de prueba = se cayo el voltaje)");
-    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, orbsentido=, control=1|0, epscorr=, andar=trote|ambladura|salto|brinco, fase1..4=");
+    mensajeWifi("ESP principal v2 conectada. Comandos: ref=, ref1..4=, kp=, ki=, kd= (o kp1..4= por pata), banda1..4=, modo=pid|abierto, marcha=1|0, amp=, damp=, frec=, sentido=, centro=, cal1..4=, tab1..4=, mapa=1|0, real1..4=, escgiro=, lasera=, laserb=, vel=, kuff=, urecto=, orbsentido=, control=1|0, epscorr=, andar=, fase1..4=, rn=0..3, rnact=, pidtipo=pid|pi-d, calpc=");
     mensajeWifi(String("Sensores caracterizados el 16-nov: mapa=") + (mapaReal ? "1" : "0") + " (ref y theta en grados " +
                 (mapaReal ? "REALES" : "nominales") + "), escgiro=" + String(ESCALA_GIRO, 4) +
                 ", laser a=" + String(LASER_A, 4) + " b=" + String(LASER_B, 3));

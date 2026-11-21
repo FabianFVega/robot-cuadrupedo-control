@@ -79,11 +79,33 @@ FW_NUEVO = dict(FW_SENSORES, nombre="16-nov + control=1", kpe=0.3, kde=5.0, kie=
 FW_SIN_CORREGIR = dict(FW_SENSORES, nombre="sensores sin corregir", escala=1.0, la=0.891, lb=0.50)
 
 
+# 21-nov: redes entrenadas con modelado/redes_orbita.py (mismos pesos que el firmware)
+import json as _json
+_RN = _json.load(open(os.path.join(RAIZ, "modelado", "pesos_redes.json"))) \
+    if os.path.exists(os.path.join(RAIZ, "modelado", "pesos_redes.json")) else None
+
+
+def _perceptron(ew, dew, act):
+    w = _RN["perceptron"][act]; nm = _RN["norm"]
+    v = w[0] + w[1] * ew / nm["EW_N"] + w[2] * dew / nm["DEW_N"]
+    uh = 1 / (1 + np.exp(-v)) if act == "sigmoide" else (np.tanh(v) + 1) / 2 if act == "tanh" else (v + 1) / 2
+    return nm["DU_MAX"] * (2 * uh - 1)
+
+
+def _mlp(e, de, juego):
+    r = _RN["mlp"][juego]; nm = _RN["norm"]
+    x = np.array([e / nm["ED_N"], np.clip(de, -6, 6) / nm["DED_N"]])
+    h = np.tanh(np.array(r["W1"]) @ x + np.array(r["b1"]))
+    return np.tanh(h @ np.array(r["W2"]) + r["b2"])
+
+
 def simular(fw, phi_obj, dref, rng, registrar=False, nominal=False):
     """Una orbita completa. Devuelve un dict con lo que paso de verdad."""
+    UMIN = fw.get("umin", globals()["UMIN"]); UMAX = fw.get("umax", globals()["UMAX"])
+    rn = fw.get("rn", 0); rnact = fw.get("rnact", "tanh")
     k = 0.0 if nominal else 1.0
     v_run = V * (1.0 + k * S_V * rng.standard_normal())
-    ku_run = KU * (1.0 + k * S_KU * rng.standard_normal())
+    ku_run = fw.get("signo_planta", 1.0) * KU * (1.0 + k * S_KU * rng.standard_normal())
     w_propio = k * S_GIRO_PROPIO * rng.standard_normal()
     d0 = dref + k * S_D0 * rng.standard_normal()
     Rc = R_TUBO + d0 + MEDIO_ANCHO
@@ -102,7 +124,8 @@ def simular(fw, phi_obj, dref, rng, registrar=False, nominal=False):
     phi = 0.0; wfilt = 0.0; iW = 0.0; iE = 0.0
     dist_f = -1.0; ddist_f = 0.0; t_sin = 0.0
     eps = 0.0; eps0 = 0.0; eps0_listo = (fw["eps"] == "cero")
-    u = u0 if fw["kuff"] <= 0 else float(np.clip(wref / fw["kuff"], UMIN, UMAX))
+    u = u0 if fw["kuff"] == 0 else float(np.clip(wref / fw["kuff"], UMIN, UMAX))
+    uper = 0.0; ew_prev = 0.0
     marcha = True; escala_m = 0.0
     ang_prev = np.arctan2(y, x); ang_rec = 0.0
     lect_laser = -1.0; t_laser = 0.0
@@ -164,6 +187,8 @@ def simular(fw, phi_obj, dref, rng, registrar=False, nominal=False):
                 e = np.clip(dist_f - dref, -10.0, 10.0)
                 iE = np.clip(iE + fw["kie"] * e * TS, -IELIM, IELIM)
                 corr = np.clip(fw["kpe"] * e + fw["kde"] * ddist_f + iE, -fw["wlim"], fw["wlim"])
+                if rn >= 2:
+                    corr = fw["wlim"] * _mlp(e, ddist_f, "control1" if fw["kpe"] > 0.2 else "control0")
                 v_est = abs(wfilt) * np.pi / 180.0 * (R_TUBO + dist_f + MEDIO_ANCHO)
                 if v_est > 1.0:
                     eps = -sg * np.rad2deg(np.arcsin(np.clip(ddist_f / v_est, -0.5, 0.5)))
@@ -171,12 +196,18 @@ def simular(fw, phi_obj, dref, rng, registrar=False, nominal=False):
                     eps0 = eps; eps0_listo = True
             else:
                 t_sin += TS; sin_laser += 1
-                corr = iE
+                corr = 0.0 if rn >= 2 else iE
             wobj = wref + sg * corr
             ew = wobj - wfilt
-            base = u0 if fw["kuff"] <= 0 else float(np.clip(wobj / fw["kuff"], UMIN, UMAX))
-            iW = np.clip(iW + fw["kiw"] * ew * TS, UMIN - base, UMAX - base)
-            u = float(np.clip(base + iW + fw["kpw"] * ew, UMIN, UMAX))
+            base = u0 if fw["kuff"] == 0 else float(np.clip(wobj / fw["kuff"], UMIN, UMAX))
+            sp = -1.0 if fw["kuff"] < 0 else 1.0
+            if rn in (1, 3):
+                uper = float(np.clip(uper + sp * _perceptron(ew, ew - ew_prev, rnact), UMIN - base, UMAX - base))
+                u = float(np.clip(base + uper, UMIN, UMAX))
+            else:
+                iW = np.clip(iW + sp * fw["kiw"] * ew * TS, UMIN - base, UMAX - base)
+                u = float(np.clip(base + iW + sp * fw["kpw"] * ew, UMIN, UMAX))
+            ew_prev = ew
             ang_tubo = phi - ((eps - eps0) if eps0_listo else 0.0)
             rec = ang_tubo if (fw["eps"] != "no" and laser_ok) else phi
             if abs(rec) + abs(wfilt) * RAMPA_S * 0.5 >= phi_obj:

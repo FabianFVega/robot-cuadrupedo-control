@@ -78,3 +78,11 @@ pruebas: `docs/cambios_16nov_sensores.md`.
 
 Nota: `firmware/esp_sensores_pata_v2` y `pc/` de este repositorio son versiones de comienzos de
 octubre. Las del 28-oct que están en el robot y en la PC no se han subido aquí.
+
+## 21-nov: versión para la presentación
+
+- `firmware/esp_principal_pid_4patas_v2/`: perfil de noviembre (trote amp 30, frec 2, desfase 45, la órbita gira con damp).
+- `firmware/esp_principal_octubre/`: el mismo código con la configuración de octubre (amp 20, frec 3, damp −6; órbita con ddesf −180, desforb −45, horaria).
+- En los dos: centros de noviembre, `mapa=0`, se ignora `cal1..4` de la PC (`calpc=1` lo acepta),
+  `pidtipo=pid|pi-d` para las rodillas, `rn=0..3` (PID, perceptrón, MLP, ambas) y `rnact=` para la órbita.
+- `modelado/redes_orbita.py` entrena las redes y escribe `pesos_redes.h`; `modelado/comparar_controladores.py` compara los modos en simulación.
