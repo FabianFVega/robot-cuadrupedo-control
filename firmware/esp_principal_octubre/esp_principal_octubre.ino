@@ -693,6 +693,9 @@ float ewPrev = 0.0;
 uint8_t rnPrevio = 0;
 float corrMlp = 0.0, duPer = 0.0;
 unsigned long usRedes = 0;   // tiempo de calculo de las redes (us)
+// 21-nov: linea "@orb,..." para monitor_presentacion.py (orbtele=1; la PC vieja no la pide)
+bool  ORBTELE = false;
+float corrAplicada = 0.0, ewUlt = 0.0, dewUlt = 0.0, eDistUlt = 0.0, recorridoUlt = 0.0;
 float phiInicioOrbita = 0.0;
 float distFilt = -1.0, dDistFilt = 0.0;
 float wFilt = 0.0, iW = 0.0, iE = 0.0, wObj = 0.0, uOrbita = 0.0;
@@ -761,20 +764,23 @@ void pasoOrbita() {
     float e = constrain(distFilt - DREF, -10.0, 10.0);
     iE = constrain(iE + KIE * e * dt, -IELIM, IELIM);
     corr = constrain(KPE * e + KDE * dDistFilt + iE, -WLIM, WLIM);
-    if (RN_MODO >= 2) {                                   // MLP 2-8-1 (sin integral)
+    {                                                     // MLP 2-8-1 (sin integral); en sombra si rn<2
       unsigned long t0 = micros();
       uint8_t j = (KPE > 0.2) ? 1 : 0;                    // pesos de control=1 o control=0
       float x0 = e / RN_ED_N, x1 = constrain(dDistFilt, -6.0, 6.0) / RN_DED_N;
       float o = MLP_B2[j];
       for (uint8_t h = 0; h < 8; h++) o += MLP_W2[j][h] * tanh(MLP_W1[j][h][0] * x0 + MLP_W1[j][h][1] * x1 + MLP_B1[j][h]);
       corrMlp = WLIM * tanh(o);
-      corr = corrMlp;
       usRedes += micros() - t0;
     }
+    if (RN_MODO >= 2) corr = corrMlp;
+    eDistUlt = e;
   } else {
     tSinLaser += dt;
+    corrMlp = 0.0;
     corr = (RN_MODO >= 2) ? 0.0 : iE;
   }
+  corrAplicada = corr;
   wObj = WREF + sg * corr;
   // correccion del angulo recorrido (solo con distancia creible)
   if (laserOK) {
@@ -795,15 +801,18 @@ void pasoOrbita() {
   if (per && !perAntes) { uPer = uOrbita - base; ewPrev = ew; }          // cambio sin salto
   if (!per && perAntes) iW = (uOrbita - base) - sp * KPW * ew;
   rnPrevio = RN_MODO;
-  if (per) {                                            // perceptron, forma incremental
+  {                                                     // perceptron (en sombra si rn=0/2)
     unsigned long t0 = micros();
     const float *w = PER_W[RN_ACT];
     float v = w[0] + w[1] * ew / RN_EW_N + w[2] * (ew - ewPrev) / RN_DEW_N;
     float uh = (RN_ACT == 0) ? 1.0 / (1.0 + exp(-v)) : (RN_ACT == 1) ? (tanh(v) + 1.0) / 2.0 : (v + 1.0) / 2.0;
     duPer = sp * RN_DU_MAX * (2.0 * uh - 1.0);
+    usRedes += micros() - t0;
+  }
+  ewUlt = ew; dewUlt = ew - ewPrev;
+  if (per) {                                            // perceptron, forma incremental
     uPer = constrain(uPer + duPer, UMIN[k] - base, UMAX[k] - base);
     uOrbita = constrain(base + uPer, UMIN[k], UMAX[k]);
-    usRedes += micros() - t0;
   } else {
     iW = constrain(iW + sp * KIW * ew * dt, UMIN[k] - base, UMAX[k] - base);
     uOrbita = constrain(base + iW + sp * KPW * ew, UMIN[k], UMAX[k]);
@@ -816,6 +825,7 @@ void pasoOrbita() {
   // la rampa de parada dura RAMPA_S y el robot sigue girando mientras baja la
   // amplitud (~la mitad de la rampa a velocidad plena): se anticipa la parada
   float anticipo = fabs(wFilt) * RAMPA_S * 0.5;
+  recorridoUlt = recorrido;
   if (fabs(recorrido) + anticipo >= PHI_OBJ) {
     orbitaActiva = false;
     marchaActiva = false;                               // rampa de parada de 1 s
@@ -1178,6 +1188,7 @@ void aplicarComando(String linea) {
   else if (clave == "kuff")    { KUFF = constrain(val, -2.0, 2.0); }
   else if (clave == "urecto")  { URECTO[ACTUADOR] = val; }
   else if (clave == "rn")      { RN_MODO = (uint8_t)constrain((int)val, 0, 3); mensajeWifi("OK rn=" + String(RN_MODO) + nombreRn()); return; }
+  else if (clave == "orbtele") { ORBTELE = (val != 0); mensajeWifi(String("OK orbtele=") + (ORBTELE ? "1" : "0")); return; }
   else if (clave == "calpc")   { IGNORAR_CAL_PC = (val == 0); mensajeWifi(String("OK calpc=") + (IGNORAR_CAL_PC ? "0: se ignora cal1..4 de la PC" : "1: se acepta cal1..4")); return; }
   else if (clave == "orbsentido") { SENTIDO_ORB = (val >= 0) ? 1.0 : -1.0; wrefManual = false; }
   else if (clave == "desforb") { DESFASE_ORBITA = constrain(val, -180.0, 180.0); }
@@ -1409,6 +1420,20 @@ void enviarTelemetria(unsigned long t, const bool *valida, const float *error) {
   s += ','; s += String(DAMP, 2);                    // campo 21 (9-oct): damp aplicado
   s += ','; s += String(DDESF, 1);                   // campo 22 (21-oct): ddesf aplicado
   s += "\r\n";
+  if (ORBTELE) {                                      // 21-nov: datos de la orbita y de las redes
+    s += "@orb,"; s += t;
+    s += ','; s += orbitaActiva ? 1 : 0;
+    s += ','; s += String(wFilt, 2);  s += ','; s += String(wObj, 2);
+    s += ','; s += String(ewUlt, 2);  s += ','; s += String(dewUlt, 3);
+    s += ','; s += String(distFilt, 2); s += ','; s += String(DREF, 1); s += ','; s += laserOK ? 1 : 0;
+    s += ','; s += String(eDistUlt, 2); s += ','; s += String(dDistFilt, 2);
+    s += ','; s += String(uOrbita, 1); s += ','; s += String(corrAplicada, 2);
+    s += ','; s += String(corrMlp, 2); s += ','; s += String(duPer, 3);
+    s += ','; s += RN_MODO; s += ','; s += RN_ACT;
+    s += ','; s += String(recorridoUlt, 1); s += ','; s += String(PHI_OBJ, 0);
+    s += ','; s += ACTUADOR; s += ','; s += (KPE > 0.2) ? 1 : 0; s += ','; s += usRedes;
+    s += "\r\n";
+  }
   bufTele += s;
   if (millis() - tUltimoEnvioTele < 100 && bufTele.length() < 900) return;
   tUltimoEnvioTele = millis();
